@@ -20,19 +20,19 @@ def _search_payload(max_candidates: int = 20):
             "adx_min": {"start": 10.0, "stop": 10.0, "step": 1.0},
             "adx_max": {"start": 20.0, "stop": 20.0, "step": 1.0},
             "tp_price_pct": {"start": 0.5, "stop": 1.0, "step": 0.5},
-            "rsi_exit": null
+            "rsi_exit": None,
         },
         "gates": {
             "min_total_trades": 1,
-            "min_positive_window_fraction": 0.0
+            "min_positive_window_fraction": 0.0,
         },
         "refinement": {
-            "enabled": false,
+            "enabled": False,
             "step_divisor": 2,
             "radius_steps": 1,
             "max_seeds": 2,
-            "max_candidates": max_candidates
-        }
+            "max_candidates": max_candidates,
+        },
     }
 
 
@@ -84,7 +84,11 @@ def test_search_never_requests_validation_or_holdout(tmp_path: Path, monkeypatch
 
 def test_search_refuses_a_grid_above_safety_cap(tmp_path: Path, monkeypatch):
     spec = SimpleNamespace(symbol="BTCUSDT", name="study", dataset_fingerprint_sha256="a" * 64)
-    monkeypatch.setattr(search_module, "load_study_context", lambda *a, **k: SimpleNamespace(spec=spec))
+    monkeypatch.setattr(
+        search_module,
+        "load_study_context",
+        lambda *a, **k: SimpleNamespace(spec=spec),
+    )
     search_path = tmp_path / "search.json"
     search_path.write_text(json.dumps(_search_payload(max_candidates=3)), encoding="utf-8")
     with pytest.raises(ValueError, match="above max_candidates"):
