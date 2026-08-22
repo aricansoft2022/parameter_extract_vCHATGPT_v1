@@ -24,6 +24,7 @@ pextract-bulk-search = "parameter_extract.bulk_cli:main"
 pextract-scale = "parameter_extract.scale_cli:main"
 pextract-bundle = "parameter_extract.bundle_cli:main"
 pextract-freeze-diverse = "parameter_extract.diverse_freeze:main"
+pextract-freeze-diverse-filtered = "parameter_extract.filtered_diverse_freeze:main"
 pextract-migrate-paramderive = "parameter_extract.legacy_data_cli_compat:main"
 
 [tool.setuptools.packages.find]
