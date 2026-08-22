@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "aricansoft2022/cryptobot_vCLUADE_v5",
+    "commit": "0ab6aa532cb22f399bc94393280c604cb6756d66",
+    "file": "src/ccbot/indicators.py",
+    "note": "Pinned live-bot source contract; regenerate with tools/refresh_parity_fixture.py from that checkout."
+  },
+  "strategy": {
+    "symbol": "BTCUSDT",
+    "rsi_period": 14,
+    "rsi_entry": 30.0,
+    "adx_min": 0.0,
+    "adx_max": 100.0,
+    "exit_mode": "tp",
+    "rsi_exit": null,
+    "tp_price_pct": 1.0
+  },
+  "candles": {
+    "kind": "synthetic_wave_v1",
+    "count": 90,
+    "base_time_ms": 1700000000000,
+    "base_price": 100.0,
+    "amplitude": 4.0,
+    "period_divisor": 4.2,
+    "trend_per_bar": 0.015,
+    "open_phase": 0.6,
+    "spread_base": 0.35,
+    "spread_growth": 0.003,
+    "volume_base": 100.0
+  },
+  "expected": {
+    "points": [
+      {"index": 27, "rsi": 63.311157972077176, "adx": 21.52571236502706, "adr": 1.197471781380295},
+      {"index": 28, "rsi": 67.06951526543273, "adx": 22.423454579132102, "adr": 1.2030827621884117},
+      {"index": 47, "rsi": 29.72046572305358, "adx": 30.81698434459074, "adr": 1.2834615495043908},
+      {"index": 48, "rsi": 32.57637030347533, "adx": 31.15666804644395, "adr": 1.298280817205729},
+      {"index": 49, "rsi": 37.15350400455055, "adx": 30.808889154222197, "adr": 1.312404029867744},
+      {"index": 73, "rsi": 28.477632765690316, "adx": 31.22258538858393, "adr": 1.4350967776719412},
+      {"index": 74, "rsi": 30.579455209411762, "adx": 31.774235038422553, "adr": 1.4500734861805924},
+      {"index": 75, "rsi": 34.61825961897031, "adx": 31.70960184425774, "adr": 1.4645162645917529},
+      {"index": 89, "rsi": 63.8245357408696, "adx": 32.89868846191144, "adr": 1.5634026937702288}
+    ],
+    "signals": [
+      {"candle_index": 48, "timestamp_ms": 1700002939999},
+      {"candle_index": 74, "timestamp_ms": 1700004499999}
+    ]
+  }
+}
