@@ -16,6 +16,7 @@ from .promotion import freeze_discovery_result, run_validation
 from .replay import run_strategy
 from .robustness import run_robustness
 from .search import run_search
+from .selection import run_selection
 from .study import run_study
 
 
@@ -105,6 +106,17 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio.add_argument("--portfolio", dest="portfolio_file", required=True)
     portfolio.add_argument("--data-directory", required=True)
     portfolio.add_argument("--output", required=True)
+
+    selection = sub.add_parser(
+        "select-portfolio",
+        help="apply one-pass leave-one-out gates without retuning or priority optimization",
+    )
+    selection.add_argument("--study", dest="study_file", required=True)
+    selection.add_argument("--families-result", required=True)
+    selection.add_argument("--portfolio-result", required=True)
+    selection.add_argument("--selection", dest="selection_file", required=True)
+    selection.add_argument("--data-directory", required=True)
+    selection.add_argument("--output", required=True)
     return parser
 
 
@@ -132,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         return _families(args)
     if args.command == "portfolio":
         return _portfolio(args)
+    if args.command == "select-portfolio":
+        return _select_portfolio(args)
     return 2
 
 
@@ -361,6 +375,45 @@ def _portfolio(args: argparse.Namespace) -> int:
                     "weighted_slot_utilization_pct"
                 ],
                 "priority_optimized": payload["priority_optimized"],
+                "leverage_applied": payload["leverage_applied"],
+                "holdout_accessed": payload["holdout_accessed"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _select_portfolio(args: argparse.Namespace) -> int:
+    payload = run_selection(
+        args.study_file,
+        args.families_result,
+        args.portfolio_result,
+        args.selection_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    validation = payload["selected_portfolio_phase_aggregates"]["validation"]
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "selection_fingerprint_sha256": payload[
+                    "selection_fingerprint_sha256"
+                ],
+                "selected_set_fingerprint_sha256": payload[
+                    "selected_set_fingerprint_sha256"
+                ],
+                "source_representative_count": payload[
+                    "source_representative_count"
+                ],
+                "selected_count": payload["selected_count"],
+                "dropped_count": payload["dropped_count"],
+                "selected_validation_return_pct": validation[
+                    "fixed_baseline_total_return_pct"
+                ],
+                "priority_reoptimized": payload["priority_reoptimized"],
+                "iterative_subset_search": payload["iterative_subset_search"],
                 "leverage_applied": payload["leverage_applied"],
                 "holdout_accessed": payload["holdout_accessed"],
             },
