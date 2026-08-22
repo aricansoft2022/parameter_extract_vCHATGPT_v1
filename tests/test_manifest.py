@@ -20,6 +20,15 @@ def test_sha256_and_manifest_verification_detect_mutation(tmp_path: Path):
     assert any("sha256 mismatch" in problem for problem in problems)
 
 
+def test_manifest_fingerprint_detects_metadata_tampering(tmp_path: Path):
+    candle_file = tmp_path / "BTCUSDT.csv"
+    candle_file.write_text("hello\n", encoding="utf-8")
+    manifest = build_manifest(candle_path=candle_file, candles=[_candle(0)], source="original")
+    manifest["source"] = "changed after fingerprinting"
+    problems = verify_manifest(manifest, directory=tmp_path)
+    assert any("manifest fingerprint mismatch" in problem for problem in problems)
+
+
 def test_audit_records_gaps_but_marks_duplicates_as_integrity_failure():
     healthy_with_gap = audit_candles([_candle(0), _candle(60_000), _candle(180_000)])
     assert healthy_with_gap.gap_count == 1
