@@ -303,13 +303,58 @@ def _summarize_evidence(
         }
         for row in selected
     ]
+    allowed_pairs = {
+        (row["family_id"], row["candidate_fingerprint_sha256"])
+        for row in selected_rows
+    }
+    if len(allowed_pairs) != len(selected_rows):
+        raise ValueError("selected risk families contain duplicates")
+
+    normalized_evidence: list[dict[str, Any]] = []
+    for index, row in enumerate(evidence):
+        source = str(row["source"])
+        phase = str(row["phase"])
+        family_id = str(row["family_id"])
+        fingerprint = str(row["candidate_fingerprint_sha256"])
+        mae = float(row["mae_pct"])
+        adverse = float(row["adverse_move_pct"])
+        holding = float(row["holding_minutes"])
+        if not all(math.isfinite(value) for value in (mae, adverse, holding)):
+            raise ValueError(f"risk evidence row {index} contains non-finite values")
+        if adverse < 0.0 or adverse != max(0.0, -mae):
+            raise ValueError(f"risk evidence row {index} adverse move disagrees with MAE")
+        if holding < 0.0:
+            raise ValueError(f"risk evidence row {index} has negative holding time")
+        if source == "development":
+            if phase not in {"discovery", "validation"}:
+                raise ValueError(f"risk evidence row {index} has invalid development phase")
+        elif source == "holdout":
+            if phase != "holdout":
+                raise ValueError(f"risk evidence row {index} has invalid holdout phase")
+        else:
+            raise ValueError(f"risk evidence row {index} has unknown source")
+        if (family_id, fingerprint) not in allowed_pairs:
+            raise ValueError(f"risk evidence row {index} references an unselected family")
+        normalized_evidence.append(
+            {
+                "source": source,
+                "phase": phase,
+                "window": str(row["window"]),
+                "family_id": family_id,
+                "candidate_fingerprint_sha256": fingerprint,
+                "mae_pct": mae,
+                "adverse_move_pct": adverse,
+                "holding_minutes": holding,
+            }
+        )
+
     families: list[dict[str, Any]] = []
     all_adverse: list[float] = []
     all_holding: list[float] = []
     for selected_row in selected_rows:
         family_rows = [
             row
-            for row in evidence
+            for row in normalized_evidence
             if row["family_id"] == selected_row["family_id"]
             and row["candidate_fingerprint_sha256"]
             == selected_row["candidate_fingerprint_sha256"]
@@ -358,9 +403,13 @@ def _summarize_evidence(
     )
     return {
         "evidence_scope": "selected_portfolio_discovery_validation_plus_sealed_holdout",
-        "closed_trade_count": len(evidence),
-        "development_trade_count": sum(row["source"] == "development" for row in evidence),
-        "holdout_trade_count": sum(row["source"] == "holdout" for row in evidence),
+        "closed_trade_count": len(normalized_evidence),
+        "development_trade_count": sum(
+            row["source"] == "development" for row in normalized_evidence
+        ),
+        "holdout_trade_count": sum(
+            row["source"] == "holdout" for row in normalized_evidence
+        ),
         "worst_adverse_move_pct": worst_all,
         "p95_adverse_move_pct": _nearest_rank(all_adverse, 0.95),
         "max_holding_minutes": max(all_holding) if all_holding else None,
