@@ -22,6 +22,7 @@ pextract-cached-search = "parameter_extract.cached_cli:main"
 pextract-query-search = "parameter_extract.query_cli:main"
 pextract-bulk-search = "parameter_extract.bulk_cli:main"
 pextract-scale = "parameter_extract.scale_cli:main"
+pextract-bundle = "parameter_extract.bundle_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

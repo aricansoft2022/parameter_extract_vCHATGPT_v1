@@ -21,14 +21,16 @@ The project is intentionally built as a chain of research gates rather than a pr
 12. **Post-holdout MAE risk budget** — a PASS selected portfolio is stress-budgeted from observed adverse excursions without alpha retuning or leverage-profit optimization. Allocation must preserve the researched slot count.
 13. **Binance exchange-risk gate** — provisional leverage is checked against a pinned production USD-M leverage-bracket snapshot, a declared capital envelope and real Binance-reported isolated-long liquidation-price parity fixtures.
 14. **Audited deployment export** — the exact selection -> risk -> exchange-risk artifact lineage is serialized into the audited live bot's `teams.csv` contract plus a self-verifying deployment manifest. No live bot files, database rows or settings are changed by the exporter.
+15. **Exact accelerated discovery** — prepared indicators, crossing-event indexing, entry-signal membership caching, exact exit/range queries and bulk entry-membership inversion remove repeated work while runtime parity remains chained back to truth replay.
+16. **Deterministic work profiling** — query/entry work counters are machine-independent and wall-clock benchmarking remains separate, so the next optimization is chosen from measured work rather than intuition.
+17. **Fail-closed scale calibration** — increasing candidate budgets are exercised on the target dataset/machine under explicit time/heap limits; `safe_max_candidates` is only the last passing stage and is never auto-applied.
+18. **Calibrated research bundle** — manifest, study, exact discovery search and scale-calibration contracts are pinned together; discovery is blocked unless the exact intended grid has passed calibration on the same machine/runtime.
 
-Still intentionally deferred:
-
-- factorized/high-throughput search for very large grids.
+No universal large-grid cap is claimed. A 50k/100k/1M budget is considered safe only after the exact bundled discovery grid passes its explicit calibration contract on the machine that will run it.
 
 ## Core research rules
 
-- **Live fidelity before speed.** Any future fast path must reproduce the truth replay.
+- **Live fidelity before speed.** Every accelerated path must reproduce the truth replay through runtime parity gates.
 - **Named data before results.** Every study is pinned to byte-level input identities.
 - **Discovery searches; validation rejects.** Validation never retunes a frozen center.
 - **Neighbors diagnose; they do not replace.** Robustness cannot promote a nearby variant.
@@ -41,6 +43,9 @@ Still intentionally deferred:
 - **Risk cannot silently change the sealed set.** Insufficient evidence for one selected family blocks deployment rather than removing the family after holdout.
 - **Export serializes; it never redecides.** IDs and enabled state are explicit handoff settings, while strategy parameters, membership, priority order and leverage remain frozen.
 - **The live CSV target is audited by commit.** V1 refuses a different ccbot commit rather than assuming its import contract stayed compatible.
+- **Scale is calibrated, not assumed.** Candidate-count budgets are only accepted after explicit resource/parity stages on real data.
+- **The exact discovery grid must be calibrated.** A different grid with the same candidate count is not treated as equivalent work.
+- **Calibration is machine-specific.** A safe-cap artifact from a different Python/platform/CPU environment cannot authorize discovery.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
 - **Open-at-end is censored data.** The engine never fabricates an exit at a calendar or study-window boundary.
@@ -168,7 +173,32 @@ pextract search \
   --output discovery-search.json
 ```
 
-This correctness-first path deliberately refuses grids above its configured candidate cap. Large-scale factorization comes later, after the research semantics are stable.
+`pextract search` remains the correctness-first reference path. Accelerated engines preserve the same discovery/search semantics and are parity-gated against progressively slower reference layers rather than replacing the truth oracle.
+
+## Accelerated, calibrated real-data discovery
+
+See [`docs/RESEARCH_BUNDLE.md`](docs/RESEARCH_BUNDLE.md), [`docs/WORK_PROFILE.md`](docs/WORK_PROFILE.md) and [`docs/SCALE_CALIBRATION.md`](docs/SCALE_CALIBRATION.md).
+
+A real run should use one pinned bundle instead of launching a large grid directly:
+
+```bash
+pextract-bundle verify \
+  --bundle btc-run-2026/bundle.json \
+  --data-directory /data/binance/BTCUSDT
+
+pextract-bundle calibrate \
+  --bundle btc-run-2026/bundle.json \
+  --data-directory /data/binance/BTCUSDT \
+  --output btc-run-2026/scale-calibration-result.json
+
+pextract-bundle discovery \
+  --bundle btc-run-2026/bundle.json \
+  --calibration-result btc-run-2026/scale-calibration-result.json \
+  --data-directory /data/binance/BTCUSDT \
+  --output btc-run-2026/discovery-search.json
+```
+
+Static verification touches no research phase. Calibration is discovery-only and must include the exact intended discovery-search contract as one stage. Canonical discovery is then blocked unless that stage passed, `safe_max_candidates` covers the search budget, and the calibration machine metadata matches the current runtime.
 
 ## Freeze and validate without retuning
 
@@ -355,4 +385,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-The correctness-first V1 lineage now reaches an audited ccbot deployment artifact. The next major engineering milestone is a factorized/high-throughput search path for very large parameter grids. Any fast path must reproduce the existing truth/search semantics and must not weaken discovery/validation/holdout or artifact-provenance boundaries.
+The engine and provenance chain are now ready to be exercised on a representative real-data bundle. The next milestone is not another speculative optimization: assemble the exact candle/funding manifest plus study/search/calibration contracts, run `pextract-bundle calibrate` on the target machine, then produce the canonical bundled discovery artifact. Only measured real-data work profiles and calibration results should determine whether another acceleration layer or a larger candidate budget is justified.
