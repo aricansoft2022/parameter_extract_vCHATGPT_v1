@@ -11,7 +11,12 @@ from .cached_search import (
 )
 from .crossing_index import build_crossing_index
 from .entry_signal_cache import EntrySignalCache
-from .exit_query import ExitQueryDiscovery, build_exit_query_index, evaluate_query_discovery
+from .exit_query import (
+    ExitQueryDiscovery,
+    QueryReplayStats,
+    build_exit_query_index,
+    evaluate_query_discovery,
+)
 from .indexed_search import _runtime_index_parity_check, _stratified_parity_sample
 from .models import StrategySpec
 from .prepared import prepare_discovery
@@ -152,8 +157,9 @@ def run_query_search(
         "reference_full_candle_replay_visits_upper_bound": reference_candle_visits_upper_bound,
         "replay_acceleration_note": (
             "The query engine skips the per-candidate full candle replay loop for exit discovery. "
-            "The work profile contains deterministic logical counters; the candle upper bound "
-            "and counters are not measured wall-clock speedups."
+            "Funding work is range-selected by exact candle-index bisects before preserving the "
+            "original chronological event arithmetic. The work profile contains deterministic "
+            "logical counters; these counters are not measured wall-clock speedups."
         ),
         "pareto_objectives": list(PARETO_OBJECTIVES),
         "frontier_order_note": (
@@ -210,9 +216,17 @@ def _evaluate_query_candidate(
     stage: str,
     work_profile: QueryWorkProfile | None = None,
 ) -> dict[str, Any]:
-    compact_windows = evaluate_query_discovery(context, cache, query, strategy)
+    replay_stats = QueryReplayStats() if work_profile is not None else None
+    compact_windows = evaluate_query_discovery(
+        context,
+        cache,
+        query,
+        strategy,
+        work_stats=replay_stats,
+    )
     if work_profile is not None:
-        work_profile.record(compact_windows, query.windows)
+        assert replay_stats is not None
+        work_profile.record(compact_windows, query.windows, replay_stats=replay_stats)
     return {
         "stage": stage,
         "strategy": asdict(strategy),
