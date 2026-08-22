@@ -20,10 +20,10 @@ The project is intentionally built as a chain of research gates rather than a pr
 11. **Sealed holdout evaluation** — the exact selected-set fingerprint, slot count and priority order are replayed on holdout windows only against predeclared PASS/FAIL gates; no repair or retuning path exists inside the evaluator.
 12. **Post-holdout MAE risk budget** — a PASS selected portfolio is stress-budgeted from observed adverse excursions without alpha retuning or leverage-profit optimization. Allocation must preserve the researched slot count.
 13. **Binance exchange-risk gate** — provisional leverage is checked against a pinned production USD-M leverage-bracket snapshot, a declared capital envelope and real Binance-reported isolated-long liquidation-price parity fixtures.
+14. **Audited deployment export** — the exact selection -> risk -> exchange-risk artifact lineage is serialized into the audited live bot's `teams.csv` contract plus a self-verifying deployment manifest. No live bot files, database rows or settings are changed by the exporter.
 
 Still intentionally deferred:
 
-- ccbot `teams.csv` export and deployment manifest;
 - factorized/high-throughput search for very large grids.
 
 ## Core research rules
@@ -39,6 +39,8 @@ Still intentionally deferred:
 - **Leverage is budgeted, not optimized.** Post-holdout risk policy derives an MAE-based ceiling; it does not search leverage for historical profit.
 - **Exchange liquidation must be parity-validated.** A derived formula and synthetic tests cannot unlock export without real Binance-reported isolated liquidation fixtures.
 - **Risk cannot silently change the sealed set.** Insufficient evidence for one selected family blocks deployment rather than removing the family after holdout.
+- **Export serializes; it never redecides.** IDs and enabled state are explicit handoff settings, while strategy parameters, membership, priority order and leverage remain frozen.
+- **The live CSV target is audited by commit.** V1 refuses a different ccbot commit rather than assuming its import contract stayed compatible.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
 - **Open-at-end is censored data.** The engine never fabricates an exit at a calendar or study-window boundary.
@@ -308,6 +310,40 @@ teams_export_ready: true
 
 This does not change strategies, family membership, priority or leverage.
 
+## Final ccbot deployment export
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+The final exporter requires the exact selection, risk and exchange-risk artifacts. It checks
+their SHA-linked lineage, then serializes the frozen selected set into the exact CSV contract
+audited from `cryptobot_vCLUADE_v5` commit
+`0ab6aa532cb22f399bc94393280c604cb6756d66`.
+
+```bash
+pextract-deploy \
+  --selection-result selection-result.json \
+  --risk-result risk-result.json \
+  --exchange-risk-result exchange-risk-result.json \
+  --deployment deployment.json \
+  --teams-csv teams.csv \
+  --manifest deployment-manifest.json
+```
+
+`first_team_id` and `enabled` are explicit deployment settings; they are not research
+parameters. Strategy parameters, selected membership, compact priority order and leverage
+remain frozen. The exporter does not connect to the live bot, and the manifest explicitly
+states that existing live team-ID collisions have not been checked.
+
+Before any write to a live ccbot database, validate the generated file with the live bot's
+own dry-run importer:
+
+```bash
+ccbot import-teams teams.csv
+```
+
+Do not hand-edit the CSV after export; its exact bytes are SHA-256-pinned in the deployment
+manifest.
+
 ## Funding CSV
 
 ```text
@@ -319,4 +355,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-Build the final ccbot-compatible `teams.csv` exporter plus a deployment manifest that pins the complete research lineage, approved baseline-capital range, allocation/reserve policy, leverage, selected-set fingerprint, exchange snapshot and source commit. The exporter should refuse any input that is not `EXCHANGE_RISK_PASS` with `teams_export_ready: true`.
+The correctness-first V1 lineage now reaches an audited ccbot deployment artifact. The next major engineering milestone is a factorized/high-throughput search path for very large parameter grids. Any fast path must reproduce the existing truth/search semantics and must not weaken discovery/validation/holdout or artifact-provenance boundaries.
