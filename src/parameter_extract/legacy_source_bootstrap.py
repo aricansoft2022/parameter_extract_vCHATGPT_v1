@@ -174,8 +174,10 @@ def migrate_paramderive_market_data_with_funding_boundary(
     """Migrate accepted candles plus a later funding-required boundary.
 
     The source store remains read-only. The output directory is atomically published only
-    after the generated data manifest verifies all output files, including pinned source
-    provenance.
+    after the generated data manifest verifies all output files, including normalized source
+    provenance. Raw legacy-fingerprint evidence is retained as an operational sidecar but is
+    intentionally excluded from the new dataset fingerprint because the old fingerprint
+    includes non-semantic acceptance timestamps.
     """
     preflight = preflight_paramderive_source(
         btc1_root=btc1_root,
@@ -216,6 +218,7 @@ def migrate_paramderive_market_data_with_funding_boundary(
     candle_path = temporary / "candles.csv"
     funding_path = temporary / "funding.csv"
     provenance_path = temporary / "source-provenance.json"
+    preflight_path = temporary / "legacy-preflight.json"
     manifest_path = temporary / "data-manifest.json"
 
     imported: list[dict[str, Any]] = []
@@ -226,6 +229,11 @@ def migrate_paramderive_market_data_with_funding_boundary(
     previous_funding_ms: int | None = None
 
     try:
+        preflight_path.write_text(
+            json.dumps(preflight, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+
         with candle_path.open("w", encoding="utf-8", newline="") as candle_handle, funding_path.open(
             "w", encoding="utf-8", newline=""
         ) as funding_handle:
@@ -322,20 +330,15 @@ def migrate_paramderive_market_data_with_funding_boundary(
             "start_month": start_month.text,
             "funding_required_from": funding_start_month.text,
             "end_month": end_month.text,
-            "legacy_dataset_fingerprint_sha256": preflight[
-                "legacy_dataset_fingerprint_sha256"
-            ],
-            "legacy_fingerprint_reference_sha256": preflight[
-                "legacy_fingerprint_reference_sha256"
-            ],
-            "legacy_fingerprint_matches_reference": preflight[
-                "legacy_fingerprint_matches_reference"
-            ],
-            "legacy_fingerprint_algorithm": (
-                "backtest_vCHATGPT_v5.0 prepare.dataset_fingerprint: raw monthly BTC1 "
-                "manifest bytes + BTC1 SHA strings + funding manifest bytes at/after "
-                "funding_required_from"
-            ),
+            "legacy_exact_fingerprint_evidence": {
+                "sidecar": "legacy-preflight.json",
+                "included_in_dataset_fingerprint": False,
+                "reason": (
+                    "the legacy exact fingerprint hashes raw monthly manifest bytes, including "
+                    "operational accepted_at_utc values; the sidecar is audit evidence, not the "
+                    "normalized parameter_extract dataset identity"
+                ),
+            },
             "source_manifest_normalization": {
                 "excluded_fields": sorted(NON_SEMANTIC_SOURCE_FIELDS),
                 "reason": (
@@ -402,6 +405,7 @@ def migrate_paramderive_market_data_with_funding_boundary(
                 "generated migration manifest failed verification: " + "; ".join(problems)
             )
 
+        preflight_sha = sha256_file(preflight_path)
         temporary.replace(output)
         return {
             "schema_version": 2,
@@ -423,6 +427,8 @@ def migrate_paramderive_market_data_with_funding_boundary(
             "legacy_fingerprint_matches_reference": preflight[
                 "legacy_fingerprint_matches_reference"
             ],
+            "legacy_preflight_sha256": preflight_sha,
+            "legacy_preflight_in_dataset_fingerprint": False,
             "dataset_fingerprint_sha256": manifest["dataset_fingerprint_sha256"],
             "source_provenance_fingerprint_sha256": provenance[
                 "source_provenance_fingerprint_sha256"
@@ -432,6 +438,7 @@ def migrate_paramderive_market_data_with_funding_boundary(
                 "candles": "candles.csv",
                 "funding": "funding.csv",
                 "source_provenance": "source-provenance.json",
+                "legacy_preflight": "legacy-preflight.json",
                 "manifest": "data-manifest.json",
             },
         }
