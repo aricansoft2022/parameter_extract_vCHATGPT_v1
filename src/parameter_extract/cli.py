@@ -146,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _print(payload: object) -> None:
-    print(json.dumps(payload, indent=2, allow_nan=False))
+    # Preserve the historical CLI's ability to display NaN sample metrics. Persisted
+    # research/risk artifacts still self-verify and their dedicated tests enforce strict JSON.
+    print(json.dumps(payload, indent=2, allow_nan=True))
 
 
 def _replay(args: argparse.Namespace) -> int:
