@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from .exchange_risk import run_exchange_risk
 from .families import run_family_clustering
 from .holdout import run_holdout
 from .io import load_binance_klines_csv, load_funding_csv, load_strategy_json, write_json
@@ -121,6 +122,15 @@ def build_parser() -> argparse.ArgumentParser:
     risk.add_argument("--holdout-result", required=True)
     risk.add_argument("--risk", dest="risk_file", required=True)
     risk.add_argument("--output", required=True)
+
+    exchange_risk = sub.add_parser(
+        "exchange-risk",
+        help="validate proposed leverage against pinned Binance isolated-margin brackets",
+    )
+    exchange_risk.add_argument("--risk-result", required=True)
+    exchange_risk.add_argument("--exchange-snapshot", required=True)
+    exchange_risk.add_argument("--exchange-risk", dest="exchange_risk_file", required=True)
+    exchange_risk.add_argument("--output", required=True)
     return parser
 
 
@@ -141,13 +151,12 @@ def main(argv: list[str] | None = None) -> int:
         "select-portfolio": _select_portfolio,
         "sealed-holdout": _sealed_holdout,
         "risk-budget": _risk_budget,
+        "exchange-risk": _exchange_risk,
     }
     return handlers[args.command](args)
 
 
 def _print(payload: object) -> None:
-    # Preserve the historical CLI's ability to display NaN sample metrics. Persisted
-    # research/risk artifacts still self-verify and their dedicated tests enforce strict JSON.
     print(json.dumps(payload, indent=2, allow_nan=True))
 
 
@@ -432,6 +441,42 @@ def _risk_budget(args: argparse.Namespace) -> int:
             "provisional_deployment_leverage": summary["provisional_deployment_leverage"],
             "leverage_optimized": payload["leverage_optimized"],
             "exchange_liquidation_validated": payload["exchange_liquidation_validated"],
+            "teams_export_ready": payload["teams_export_ready"],
+        }
+    )
+    return 0
+
+
+def _exchange_risk(args: argparse.Namespace) -> int:
+    payload = run_exchange_risk(
+        args.risk_result,
+        args.exchange_snapshot,
+        args.exchange_risk_file,
+    )
+    write_json(args.output, payload)
+    worst = payload["worst_case"]
+    parity = payload["liquidation_parity"]
+    _print(
+        {
+            "output": args.output,
+            "exchange_risk_fingerprint_sha256": payload[
+                "exchange_risk_fingerprint_sha256"
+            ],
+            "status": payload["status"],
+            "failure_reasons": payload["failure_reasons"],
+            "provisional_deployment_leverage": payload[
+                "provisional_deployment_leverage"
+            ],
+            "parity_case_count": parity["case_count"],
+            "max_parity_error_bps": parity["max_error_bps"],
+            "worst_baseline_capital_usdt": worst["baseline_capital_usdt"],
+            "worst_liquidation_distance_pct": worst["liquidation_distance_pct"],
+            "liquidation_headroom_over_required_budget_pct": payload[
+                "liquidation_headroom_over_required_budget_pct"
+            ],
+            "exchange_liquidation_validated": payload[
+                "exchange_liquidation_validated"
+            ],
             "teams_export_ready": payload["teams_export_ready"],
         }
     )
