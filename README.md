@@ -18,10 +18,11 @@ The project is intentionally built as a chain of research gates rather than a pr
 9. **Shared-slot portfolio replay** — family representatives are replayed concurrently from raw signals with finite slots, explicit priority and `PENDING_ENTRY` slot reservation.
 10. **One-pass portfolio selection** — each family is removed once from the full portfolio, predeclared marginal gates yield KEEP/DROP, survivors retain original relative priority, and no iterative subset search is allowed.
 11. **Sealed holdout evaluation** — the exact selected-set fingerprint, slot count and priority order are replayed on holdout windows only against predeclared PASS/FAIL gates; no repair or retuning path exists inside the evaluator.
+12. **Post-holdout MAE risk budget** — a PASS selected portfolio is stress-budgeted from observed adverse excursions without alpha retuning or leverage-profit optimization. Allocation must preserve the researched slot count.
 
 Still intentionally deferred:
 
-- risk/leverage policy;
+- exchange-specific liquidation / maintenance-margin validation;
 - ccbot `teams.csv` export;
 - factorized/high-throughput search for very large grids.
 
@@ -35,9 +36,10 @@ Still intentionally deferred:
 - **Portfolio priority is declared, not optimized.** Shared-slot replay uses an explicit family order.
 - **Selection is one-pass, not a subset optimizer.** DROP decisions do not trigger repeated leave-one-out retesting.
 - **Holdout evaluates; it never repairs.** A FAIL cannot be converted into a PASS by loosening gates, changing strategies, dropping families or reordering priority on the same holdout data.
+- **Leverage is budgeted, not optimized.** Post-holdout risk policy derives an MAE-based ceiling; it does not search leverage for historical profit.
+- **Risk cannot silently change the sealed set.** Insufficient evidence for one selected family blocks deployment rather than removing the family after holdout.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
-- **Leverage is a risk layer, not an alpha parameter.** Search, selection and holdout remain leverage-free.
 - **Open-at-end is censored data.** The engine never fabricates an exit at a calendar or study-window boundary.
 
 ## Setup
@@ -262,6 +264,33 @@ The evaluator replays only the study's holdout windows. Strategies, selection ga
 
 A FAIL is a final result for that research lineage, not a tuning prompt. Once holdout observations influence a change, that period is no longer sealed holdout data for the changed design.
 
+## Post-holdout MAE risk budget
+
+See [`docs/RISK.md`](docs/RISK.md).
+
+The risk stage requires a PASS sealed holdout and an exact risk contract pinned to that holdout result:
+
+```bash
+pextract risk-budget \
+  --selection-result selection-result.json \
+  --holdout-result holdout-result.json \
+  --risk risk.json \
+  --output risk-result.json
+```
+
+It combines closed-trade MAE evidence for the frozen selected portfolio across discovery, validation and sealed holdout, applies predeclared stress/headroom assumptions, and derives an MAE-budget leverage ceiling. It does not search leverage for historical profit and it never changes the selected set.
+
+`allocation_pct` must imply the same number of slots used during portfolio research. If one selected family lacks the required MAE sample, the risk stage returns `BLOCK` rather than silently deleting the family after holdout.
+
+Even a `RISK_BUDGET_PASS` still records:
+
+```text
+exchange_liquidation_validated: false
+teams_export_ready: false
+```
+
+The MAE budget is not a Binance liquidation-price formula.
+
 ## Funding CSV
 
 ```text
@@ -273,4 +302,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-A sealed-holdout PASS completes the leverage-free alpha/portfolio research lineage. The next layer should be an explicit risk policy: leverage bounds, liquidation-distance stress, allocation/reserve assumptions and deployment sizing. Only after that policy is frozen should a ccbot-compatible `teams.csv` be exported.
+Validate the provisional risk-budget leverage against identified Binance USD-M isolated-margin mechanics: leverage brackets, maintenance margin and liquidation behavior. That stage must use a pinned exchange-rules snapshot and a verified liquidation model. Only after it passes should `teams.csv` export be allowed.
