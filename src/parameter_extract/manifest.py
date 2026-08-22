@@ -146,8 +146,7 @@ def verify_manifest(manifest: dict[str, object], *, directory: str | Path) -> li
     if not isinstance(files, dict):
         problems.append("manifest files section is missing or invalid")
         return problems
-    for label in ("candles", "funding"):
-        record = files.get(label)
+    for label, record in files.items():
         if record is None:
             continue
         if not isinstance(record, dict):
