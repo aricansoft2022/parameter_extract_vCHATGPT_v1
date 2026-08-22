@@ -194,7 +194,7 @@ def run_selection(
     if not selected:
         raise ValueError("selection gates dropped every family representative")
 
-    # Preserve the original relative priority. No reordering occurs after marginal evidence.
+    # Preserve original relative priority. No reordering occurs after marginal evidence.
     selected = sorted(selected, key=lambda row: row.priority)
     selected_windows = _replay_candidate_set(
         context,
@@ -396,20 +396,25 @@ def _marginal_evidence(
     full: dict[str, dict[str, Any]],
     leaveout: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    validation_candidate_rows = [
+    validation_rows = [
         candidate_row
         for window in full_windows
         if window["phase"] == "validation"
         for candidate_row in window["candidates"]
-        if candidate_row["family_id"] == candidate.family_id
     ]
-    validation_accepted = sum(
-        int(row["accepted_entry_count"]) for row in validation_candidate_rows
+    candidate_rows = [
+        row for row in validation_rows if row["family_id"] == candidate.family_id
+    ]
+    other_rows = [
+        row for row in validation_rows if row["family_id"] != candidate.family_id
+    ]
+    validation_accepted = sum(int(row["accepted_entry_count"]) for row in candidate_rows)
+    validation_blocked = sum(int(row["blocked_no_slot_count"]) for row in candidate_rows)
+    validation_raw = sum(int(row["raw_signal_count"]) for row in candidate_rows)
+    other_blocked_with_candidate = sum(
+        int(row["blocked_no_slot_count"]) for row in other_rows
     )
-    validation_blocked = sum(
-        int(row["blocked_no_slot_count"]) for row in validation_candidate_rows
-    )
-    validation_raw = sum(int(row["raw_signal_count"]) for row in validation_candidate_rows)
+    other_raw = sum(int(row["raw_signal_count"]) for row in other_rows)
 
     full_validation = full["validation"]
     leaveout_validation = leaveout["validation"]
@@ -420,13 +425,14 @@ def _marginal_evidence(
         float(leaveout_validation["worst_within_window_closed_drawdown_pct"])
         - float(full_validation["worst_within_window_closed_drawdown_pct"]),
     )
-    full_blocked_fraction = float(
-        full_validation["slot_contention_fraction_of_raw_signals"]
+    other_blocked_without_candidate = int(leaveout_validation["blocked_no_slot_count"])
+    contention_added_count = max(
+        0,
+        other_blocked_with_candidate - other_blocked_without_candidate,
     )
-    leaveout_blocked_fraction = float(
-        leaveout_validation["slot_contention_fraction_of_raw_signals"]
+    contention_added_fraction = (
+        0.0 if other_raw == 0 else contention_added_count / other_raw
     )
-    contention_added = max(0.0, full_blocked_fraction - leaveout_blocked_fraction)
     return {
         "discovery_marginal_return_pct": float(
             full_discovery["fixed_baseline_total_return_pct"]
@@ -440,13 +446,19 @@ def _marginal_evidence(
         "validation_candidate_blocked_no_slot_count": validation_blocked,
         "validation_candidate_raw_signal_count": validation_raw,
         "validation_drawdown_worsening_pct": drawdown_worsening,
-        "validation_contention_added_fraction": contention_added,
+        "validation_other_family_raw_signal_count": other_raw,
+        "validation_other_family_blocked_with_candidate_count": (
+            other_blocked_with_candidate
+        ),
+        "validation_other_family_blocked_without_candidate_count": (
+            other_blocked_without_candidate
+        ),
+        "validation_contention_added_count": contention_added_count,
+        "validation_contention_added_fraction": contention_added_fraction,
         "full_validation_return_pct": full_validation["fixed_baseline_total_return_pct"],
         "leaveout_validation_return_pct": leaveout_validation[
             "fixed_baseline_total_return_pct"
         ],
-        "full_validation_blocked_fraction": full_blocked_fraction,
-        "leaveout_validation_blocked_fraction": leaveout_blocked_fraction,
     }
 
 
