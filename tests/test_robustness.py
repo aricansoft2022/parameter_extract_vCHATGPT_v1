@@ -7,6 +7,12 @@ import pytest
 import parameter_extract.robustness as robustness_module
 from parameter_extract.manifest import sha256_file
 from parameter_extract.models import ExecutionModel
+from parameter_extract.promotion import (
+    ValidationGates,
+    ValidationSpec,
+    candidate_fingerprint,
+    validation_fingerprint,
+)
 from parameter_extract.robustness import run_robustness
 
 
@@ -40,21 +46,36 @@ def _validation_result() -> dict:
         "rsi_exit": None,
         "tp_price_pct": 1.0,
     }
+    gates = ValidationGates(
+        min_total_trades=1,
+        min_positive_window_fraction=0.5,
+        min_median_window_return_pct=0.0,
+        min_worst_window_return_pct=-2.0,
+        min_worst_mae_pct=-5.0,
+        max_open_at_end_windows=0,
+    )
+    validation_spec = ValidationSpec(
+        name="gate",
+        source_candidate_set_fingerprint_sha256="d" * 64,
+        gates=gates,
+    )
     return {
         "schema_version": 1,
         "kind": "parameter_extract.validation_result",
         "validation": "gate",
-        "validation_fingerprint_sha256": "e" * 64,
+        "validation_fingerprint_sha256": validation_fingerprint(validation_spec),
         "validation_spec": {
-            "name": "gate",
-            "source_candidate_set_fingerprint_sha256": "d" * 64,
+            "name": validation_spec.name,
+            "source_candidate_set_fingerprint_sha256": (
+                validation_spec.source_candidate_set_fingerprint_sha256
+            ),
             "gates": {
-                "min_total_trades": 1,
-                "min_positive_window_fraction": 0.5,
-                "min_median_window_return_pct": 0.0,
-                "min_worst_window_return_pct": -2.0,
-                "min_worst_mae_pct": -5.0,
-                "max_open_at_end_windows": 0,
+                "min_total_trades": gates.min_total_trades,
+                "min_positive_window_fraction": gates.min_positive_window_fraction,
+                "min_median_window_return_pct": gates.min_median_window_return_pct,
+                "min_worst_window_return_pct": gates.min_worst_window_return_pct,
+                "min_worst_mae_pct": gates.min_worst_mae_pct,
+                "max_open_at_end_windows": gates.max_open_at_end_windows,
             },
         },
         "source_candidate_set_fingerprint_sha256": "d" * 64,
@@ -71,7 +92,7 @@ def _validation_result() -> dict:
         "rejected_count": 0,
         "candidates": [
             {
-                "candidate_fingerprint_sha256": "c" * 64,
+                "candidate_fingerprint_sha256": candidate_fingerprint(strategy),
                 "strategy": strategy,
                 "discovery": {"aggregate": aggregate, "windows": []},
                 "validation": {"aggregate": aggregate, "windows": []},
@@ -100,7 +121,8 @@ def _write_contracts(tmp_path: Path) -> tuple[Path, Path]:
         "gates": {
             "min_neighbor_count": 6,
             "min_validation_pass_fraction": 0.75,
-            "min_discovery_positive_fraction": 0.75,
+            "min_discovery_stable_neighbor_fraction": 0.75,
+            "min_neighbor_discovery_positive_window_fraction": 0.5,
             "max_center_validation_advantage_pct": 5.0,
         },
         "max_neighbor_evaluations": 20,
@@ -110,9 +132,8 @@ def _write_contracts(tmp_path: Path) -> tuple[Path, Path]:
     return validation_path, robustness_path
 
 
-def test_axis_neighbors_are_diagnostic_only_and_never_touch_holdout(tmp_path: Path, monkeypatch):
-    validation_path, robustness_path = _write_contracts(tmp_path)
-    context = SimpleNamespace(
+def _context():
+    return SimpleNamespace(
         spec=SimpleNamespace(
             name="study",
             symbol="BTCUSDT",
@@ -120,6 +141,12 @@ def test_axis_neighbors_are_diagnostic_only_and_never_touch_holdout(tmp_path: Pa
             execution=ExecutionModel.expected_live(),
         )
     )
+
+
+def test_axis_neighbors_are_diagnostic_only_and_never_touch_holdout(
+    tmp_path: Path, monkeypatch
+):
+    validation_path, robustness_path = _write_contracts(tmp_path)
     calls = []
 
     def fake_evaluate(_context, strategy, *, phases, reveal_holdout=False):
@@ -141,7 +168,7 @@ def test_axis_neighbors_are_diagnostic_only_and_never_touch_holdout(tmp_path: Pa
             ],
         }
 
-    monkeypatch.setattr(robustness_module, "load_study_context", lambda *a, **k: context)
+    monkeypatch.setattr(robustness_module, "load_study_context", lambda *a, **k: _context())
     monkeypatch.setattr(robustness_module, "study_fingerprint", lambda _spec: "b" * 64)
     monkeypatch.setattr(robustness_module, "evaluate_strategy", fake_evaluate)
 
@@ -156,30 +183,91 @@ def test_axis_neighbors_are_diagnostic_only_and_never_touch_holdout(tmp_path: Pa
     assert result["holdout_accessed"] is False
     assert result["center_count"] == 1
     assert result["robust_count"] == 1
+    assert result["neighbor_evaluations"] == 9
     center = result["centers"][0]
     assert center["status"] == "ROBUST"
     assert center["center_strategy"]["rsi_entry"] == 30.0
     assert center["center_parameters_retuned"] is False
     assert center["neighbor_strategies_promotable"] is False
     assert center["metrics"]["neighbor_count"] == 9
+    assert center["metrics"]["discovery_stable_neighbor_fraction"] == 1.0
     assert calls and all(phases == ("discovery", "validation") for _, phases, _ in calls)
     assert all(reveal is False for _, _, reveal in calls)
     assert all(strategy.rsi_entry in {29.5, 30.0, 30.5} for strategy, _, _ in calls)
+    assert all(neighbor["diagnostic_only"] for neighbor in center["neighbors"])
+    assert all("candidate_fingerprint_sha256" in neighbor for neighbor in center["neighbors"])
 
 
 def test_robustness_contract_is_pinned_to_exact_validation_file(tmp_path: Path, monkeypatch):
     validation_path, robustness_path = _write_contracts(tmp_path)
-    validation_path.write_text(json.dumps({**_validation_result(), "validation": "changed"}), encoding="utf-8")
-    context = SimpleNamespace(
-        spec=SimpleNamespace(
-            name="study",
-            symbol="BTCUSDT",
-            dataset_fingerprint_sha256="a" * 64,
-            execution=ExecutionModel.expected_live(),
-        )
+    validation_path.write_text(
+        json.dumps({**_validation_result(), "validation": "changed"}), encoding="utf-8"
     )
-    monkeypatch.setattr(robustness_module, "load_study_context", lambda *a, **k: context)
+    monkeypatch.setattr(robustness_module, "load_study_context", lambda *a, **k: _context())
     with pytest.raises(ValueError, match="different validation-result file"):
+        run_robustness(
+            "study.json",
+            validation_path,
+            robustness_path,
+            data_directory=tmp_path,
+        )
+
+
+def test_validation_candidate_fingerprint_is_reverified_before_neighbors(
+    tmp_path: Path, monkeypatch
+):
+    payload = _validation_result()
+    payload["candidates"][0]["candidate_fingerprint_sha256"] = "f" * 64
+    validation_path = tmp_path / "validation-result.json"
+    validation_path.write_text(json.dumps(payload), encoding="utf-8")
+    robustness_payload = {
+        "schema_version": 1,
+        "name": "axis robustness",
+        "source_validation_result_sha256": sha256_file(validation_path),
+        "steps": {
+            "include_rsi_period": True,
+            "rsi_entry": 0.5,
+            "adx_min": 1.0,
+            "adx_max": 1.0,
+            "tp_price_pct": 0.1,
+            "rsi_exit": 0.5,
+        },
+        "gates": {
+            "min_neighbor_count": 1,
+            "min_validation_pass_fraction": 0.0,
+            "min_discovery_stable_neighbor_fraction": 0.0,
+            "min_neighbor_discovery_positive_window_fraction": 0.5,
+        },
+    }
+    robustness_path = tmp_path / "robustness.json"
+    robustness_path.write_text(json.dumps(robustness_payload), encoding="utf-8")
+    monkeypatch.setattr(robustness_module, "load_study_context", lambda *a, **k: _context())
+    monkeypatch.setattr(robustness_module, "study_fingerprint", lambda _spec: "b" * 64)
+
+    with pytest.raises(ValueError, match="strategy fingerprint mismatch"):
+        run_robustness(
+            "study.json",
+            validation_path,
+            robustness_path,
+            data_directory=tmp_path,
+        )
+
+
+def test_robustness_rejects_unexpected_phase_response(tmp_path: Path, monkeypatch):
+    validation_path, robustness_path = _write_contracts(tmp_path)
+
+    def fake_evaluate(_context, strategy, *, phases, reveal_holdout=False):
+        return {
+            "phases_evaluated": ["validation"],
+            "holdout_revealed": False,
+            "windows": [],
+        }
+
+    monkeypatch.setattr(robustness_module, "load_study_context", lambda *a, **k: _context())
+    monkeypatch.setattr(robustness_module, "study_fingerprint", lambda _spec: "b" * 64)
+    monkeypatch.setattr(robustness_module, "evaluate_strategy", fake_evaluate)
+
+    with pytest.raises(RuntimeError, match="phase isolation"):
         run_robustness(
             "study.json",
             validation_path,
