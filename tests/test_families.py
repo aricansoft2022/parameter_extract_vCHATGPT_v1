@@ -202,7 +202,7 @@ def test_family_clustering_uses_behavior_and_keeps_existing_representative(
 
     def fake_evidence(_context, strategy, *, phases):
         if strategy.rsi_entry < 35.0:
-            offset = 0 if strategy.rsi_entry == 30.0 else 30_000
+            offset = 0 if strategy.rsi_entry == 30.0 else 5_000
             windows = [
                 {
                     "raw_signal_times_ms": [60_000 + offset, 180_000 + offset, 300_000 + offset],
@@ -254,7 +254,7 @@ def test_family_clustering_uses_behavior_and_keeps_existing_representative(
     matching_pair = next(row for row in result["pairwise"] if row["same_family"])
     assert matching_pair["raw_signal_dice"] == pytest.approx(1.0)
     assert matching_pair["accepted_signal_dice"] == pytest.approx(1.0)
-    assert matching_pair["exposure_jaccard"] > 0.3
+    assert matching_pair["exposure_jaccard"] > 0.8
 
 
 def test_similarity_primitives_are_bounded_and_interpretable():
