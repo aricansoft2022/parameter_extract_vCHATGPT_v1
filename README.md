@@ -6,13 +6,13 @@ Research engine for deriving robust parameter teams for
 This repository deliberately starts with a **truth engine, not an optimizer**. The first
 milestones answer one question correctly and reproducibly:
 
-> Given one symbol, one strategy candidate and an identified continuous stream of
-> historical data, what trades would a conservative live-like execution model have
-> produced, and can we prove the signal maths still matches the live bot contract?
+> Given one symbol, one strategy candidate and an identified historical dataset, what
+> trades would a conservative live-like execution model have produced, and does the signal
+> maths still match the live bot contract?
 
 Only after this path is trusted should millions of candidates be accelerated or ranked.
 
-## Current scope: truth, accounting, integrity and parity
+## Current scope
 
 Implemented now:
 
@@ -20,26 +20,25 @@ Implemented now:
 - raw signal generation separated from execution;
 - recursive indicators reset across real one-minute data gaps;
 - one-position-per-team replay on a continuous timeline;
-- three execution regimes: `frictionless`, `expected_live`, `stress`;
-- signal-close vs next-open entry timing;
-- adverse buy/sell slippage and two-sided taker fees;
-- funding payments for long positions;
+- explicit frictionless / expected-live / stress execution assumptions;
+- next-open entry modelling, adverse slippage, taker fees and long funding;
 - TP and completed-candle RSI exits;
-- no forced close at dataset/month boundaries: an open trade remains censored/open;
-- MAE, MFE and holding-time tracking;
-- compounded return, profit factor, closed-equity drawdown, exposure and sample-size metrics;
+- no forced close at dataset or study-window boundaries;
+- MAE, MFE, holding time, drawdown, exposure and sample-size metrics;
 - SHA-256 identities for candle/funding files and optional Binance `.CHECKSUM` verification;
 - candle audits for duplicates, ordering errors and minute gaps;
-- stable dataset fingerprints that do not depend on generation time;
+- self-verifying stable dataset fingerprints;
 - a frozen indicator/signal parity fixture pinned to a full live-bot commit SHA;
-- a read-only fixture refresh tool that imports an actual local checkout of the live bot;
-- CLI commands for replay, manifest creation/verification and parity checks.
+- a read-only fixture refresh tool that imports an actual checkout of the live bot;
+- a `study.json` contract with discovery, validation and holdout windows;
+- 300-candle pre-window warm-up, matching the live bot's current REST seed limit;
+- holdout results withheld unless `--reveal-holdout` is explicitly requested;
+- study results pinned to both a dataset fingerprint and a study fingerprint.
 
 Not implemented yet, by design:
 
-- study-window orchestration;
-- coarse-to-fine parameter search;
-- walk-forward / sealed holdout evaluation;
+- coarse-to-fine candidate generation;
+- promotion rules from discovery to validation;
 - parameter-neighborhood robustness;
 - candidate clustering and signal-overlap deduplication;
 - portfolio/slot replay and priority assignment;
@@ -52,26 +51,25 @@ where a market order fills. The expected-live model therefore enters at the next
 open plus adverse slippage. The frictionless model exists as a research control, not as
 the ranking truth.
 
-TP is also treated as an application-side trigger: once the candle reaches the target, a
-sell fill is modeled at target minus adverse slippage. Because OHLC cannot reveal the
-intrabar path, MAE on a TP exit candle uses the full candle low conservatively while MFE
-is capped at the TP target so post-exit price movement cannot inflate it. If a funding
-timestamp falls in that same ambiguous TP candle, positive funding is charged but negative
-funding is not credited; uncertainty is resolved against optimistic backtest performance.
+TP is an application-side trigger: once a candle reaches the target, a sell fill is modeled
+at target minus adverse slippage. Because OHLC cannot reveal intrabar ordering, ambiguous
+TP/funding cases are resolved against optimistic backtest performance.
 
-## Continuous time and data gaps
+## Continuous time, gaps and study windows
 
-Calendar months are reporting/study windows, not trading-state boundaries. A position
-opened on August 31 may remain open into September. No month-end close is invented.
+Calendar boundaries do not fabricate exits. A normal replay can carry an August 31 trade
+into September.
 
-A missing one-minute candle *is* a state boundary for recursive indicators. RSI/ADX/ADR
-restart on the contiguous segment after the gap. A pending `next_open` entry whose very
-next candle is missing is cancelled rather than filled across an unknown interval.
+Research windows are different: discovery, validation and holdout are intentionally
+independent experiments. Each window begins flat, receives up to 300 pre-window candles
+only for indicator warm-up, opens no warm-up trades, and leaves any trade still open at the
+window end censored. This prevents validation PnL or position state leaking into discovery.
 
-Gaps are recorded in the data manifest rather than silently filled. Duplicate or backward
-open times fail the manifest integrity gate.
+A missing one-minute candle remains a real state break. RSI/ADX/ADR restart on the
+contiguous segment after the gap; nothing is forward-filled. Gaps are recorded in the data
+manifest. Duplicate or backward open times fail the integrity gate.
 
-## Usage
+## Setup and single-candidate replay
 
 ```bash
 python -m venv .venv
@@ -85,36 +83,6 @@ pextract replay \
   --funding BTCUSDT-funding.csv \
   --model expected \
   --trades
-```
-
-Create a reproducible data identity before a study:
-
-```bash
-pextract manifest \
-  --candles BTCUSDT-1m-2026-07.csv \
-  --candles-checksum BTCUSDT-1m-2026-07.zip.CHECKSUM \
-  --funding BTCUSDT-funding.csv \
-  --source "Binance futures UM archive" \
-  --output data-manifest.json
-
-pextract verify-manifest \
-  --manifest data-manifest.json \
-  --directory .
-```
-
-Run the pinned live-contract parity gate:
-
-```bash
-pextract parity --fixture tests/fixtures/live_bot_parity_v1.json
-```
-
-When the live bot intentionally changes its indicator/signal contract, regenerate the
-fixture from a checkout of that exact live-bot commit without modifying that repository:
-
-```bash
-python tools/refresh_parity_fixture.py \
-  --ccbot-root ../cryptobot_vCLUADE_v5 \
-  --fixture tests/fixtures/live_bot_parity_v1.json
 ```
 
 Example `team.json`:
@@ -131,6 +99,99 @@ Example `team.json`:
 }
 ```
 
+## Identify the data before studying it
+
+```bash
+pextract manifest \
+  --candles BTCUSDT-1m-history.csv \
+  --candles-checksum BTCUSDT-1m-history.CHECKSUM \
+  --funding BTCUSDT-funding.csv \
+  --source "Binance futures UM archive" \
+  --output data-manifest.json
+
+pextract verify-manifest \
+  --manifest data-manifest.json \
+  --directory .
+```
+
+The manifest fingerprint is recomputed during verification. Editing manifest metadata or
+file identities while keeping an old fingerprint is therefore detected.
+
+## Live-bot parity gate
+
+```bash
+pextract parity --fixture tests/fixtures/live_bot_parity_v1.json
+```
+
+When the live bot intentionally changes its indicator/signal contract, regenerate the
+fixture from a checkout of that exact live-bot commit without modifying that repository:
+
+```bash
+python tools/refresh_parity_fixture.py \
+  --ccbot-root ../cryptobot_vCLUADE_v5 \
+  --fixture tests/fixtures/live_bot_parity_v1.json
+```
+
+## Study contract
+
+A study references the fingerprint emitted by its data manifest and stores execution
+assumptions as literal numbers, so a future change to defaults cannot silently rewrite an
+old experiment.
+
+```json
+{
+  "schema_version": 1,
+  "name": "BTC walk-forward example",
+  "symbol": "BTCUSDT",
+  "dataset_manifest": "data-manifest.json",
+  "dataset_fingerprint_sha256": "COPY_THE_64_HEX_VALUE_FROM_THE_MANIFEST_HERE",
+  "execution": {
+    "name": "expected_live",
+    "entry_timing": "next_open",
+    "taker_fee_bps": 4.0,
+    "buy_slippage_bps": 2.0,
+    "sell_slippage_bps": 2.0
+  },
+  "windows": {
+    "discovery": [
+      {"name": "discovery-1", "start_ms": 1735689600000, "end_ms": 1743465600000}
+    ],
+    "validation": [
+      {"name": "validation-1", "start_ms": 1743465600000, "end_ms": 1751328000000}
+    ],
+    "holdout": [
+      {"name": "holdout-1", "start_ms": 1751328000000, "end_ms": 1759276800000}
+    ]
+  },
+  "warmup_candles": 300,
+  "min_trades": 30
+}
+```
+
+Discovery and validation only:
+
+```bash
+pextract study \
+  --study study.json \
+  --team team.json \
+  --data-directory . \
+  --output study-result.json
+```
+
+Reveal holdout only when the research decision is already frozen:
+
+```bash
+pextract study \
+  --study study.json \
+  --team team.json \
+  --data-directory . \
+  --reveal-holdout \
+  --output final-holdout-result.json
+```
+
+The CLI cannot make statistical discipline cryptographically impossible to violate, but it
+makes accidental holdout leakage non-default and records whether holdout was revealed.
+
 Funding CSV schema:
 
 ```text
@@ -141,18 +202,20 @@ timestamp_ms,rate,mark_price
 `mark_price` may be blank; in that case the enclosing one-minute candle close is used as
 an explicit approximation.
 
-## Research rules we intend to preserve
+## Research rules
 
-1. **Live fidelity before speed.** Any future fast path must be checked against this replay.
-2. **Named data before results.** A study must carry byte-level input identities and audits.
-3. **Robust region before best point.** Search should prefer stable parameter plateaus.
-4. **Out-of-sample survival before historical profit.** Discovery results are hypotheses.
-5. **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
-6. **Leverage is a risk layer, not an alpha parameter.** Search returns underlying price-edge behavior.
-7. **Open-at-end is censored data.** The engine never fabricates a month-end exit.
+1. **Live fidelity before speed.** Any future fast path must reproduce the truth replay.
+2. **Named data before results.** Every study carries byte-level input identities and audits.
+3. **Independent windows before one giant backtest.** Validation begins flat and cannot borrow discovery state.
+4. **Robust region before best point.** Search should prefer stable parameter plateaus.
+5. **Out-of-sample survival before historical profit.** Discovery results are hypotheses.
+6. **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
+7. **Leverage is a risk layer, not an alpha parameter.** Search remains leverage-free.
+8. **Open-at-end is censored data.** The engine never fabricates a study-window exit.
 
 ## Next milestone
 
-Build a `study.json` contract and study runner that explicitly names discovery, validation
-and sealed holdout windows, requires a verified dataset fingerprint, and records every
-assumption. Only then add coarse-to-fine candidate generation against the truth replay.
+Add coarse-to-fine candidate generation that is permitted to inspect **discovery windows
+only**. Candidates then move through validation without parameter retuning. Holdout remains
+outside the search path. After that comes neighborhood robustness and candidate clustering,
+not a naive top-profit leaderboard.
