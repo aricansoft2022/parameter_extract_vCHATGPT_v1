@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from .families import run_family_clustering
 from .io import load_binance_klines_csv, load_funding_csv, load_strategy_json, write_json
 from .manifest import build_manifest, read_checksum_file, verify_manifest
 from .metrics import summarize
@@ -83,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
     robust.add_argument("--robustness", dest="robustness_file", required=True)
     robust.add_argument("--data-directory", required=True)
     robust.add_argument("--output", required=True)
+
+    families = sub.add_parser(
+        "families",
+        help="cluster ROBUST frozen centers by parameter and trading-behavior overlap",
+    )
+    families.add_argument("--study", dest="study_file", required=True)
+    families.add_argument("--robustness-result", required=True)
+    families.add_argument("--families", dest="family_file", required=True)
+    families.add_argument("--data-directory", required=True)
+    families.add_argument("--output", required=True)
     return parser
 
 
@@ -106,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         return _validate_candidates(args)
     if args.command == "robustness":
         return _robustness(args)
+    if args.command == "families":
+        return _families(args)
     return 2
 
 
@@ -273,6 +286,34 @@ def _robustness(args: argparse.Namespace) -> int:
                 "neighbor_strategies_promotable": payload[
                     "neighbor_strategies_promotable"
                 ],
+                "holdout_accessed": payload["holdout_accessed"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _families(args: argparse.Namespace) -> int:
+    payload = run_family_clustering(
+        args.study_file,
+        args.robustness_result,
+        args.family_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "family_fingerprint_sha256": payload["family_fingerprint_sha256"],
+                "robust_center_count": payload["robust_center_count"],
+                "pair_evaluations": payload["pair_evaluations"],
+                "family_count": payload["family_count"],
+                "deduplicated_center_count": payload[
+                    "deduplicated_center_count"
+                ],
+                "parameters_retuned": payload["parameters_retuned"],
                 "holdout_accessed": payload["holdout_accessed"],
             },
             indent=2,
