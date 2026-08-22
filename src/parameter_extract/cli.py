@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .families import run_family_clustering
+from .holdout import run_holdout
 from .io import load_binance_klines_csv, load_funding_csv, load_strategy_json, write_json
 from .manifest import build_manifest, read_checksum_file, verify_manifest
 from .metrics import summarize
@@ -117,6 +118,16 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--selection", dest="selection_file", required=True)
     selection.add_argument("--data-directory", required=True)
     selection.add_argument("--output", required=True)
+
+    holdout = sub.add_parser(
+        "sealed-holdout",
+        help="evaluate the frozen selected portfolio on holdout windows only",
+    )
+    holdout.add_argument("--study", dest="study_file", required=True)
+    holdout.add_argument("--selection-result", required=True)
+    holdout.add_argument("--holdout", dest="holdout_file", required=True)
+    holdout.add_argument("--data-directory", required=True)
+    holdout.add_argument("--output", required=True)
     return parser
 
 
@@ -146,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return _portfolio(args)
     if args.command == "select-portfolio":
         return _select_portfolio(args)
+    if args.command == "sealed-holdout":
+        return _sealed_holdout(args)
     return 2
 
 
@@ -415,6 +428,46 @@ def _select_portfolio(args: argparse.Namespace) -> int:
                 "priority_reoptimized": payload["priority_reoptimized"],
                 "iterative_subset_search": payload["iterative_subset_search"],
                 "leverage_applied": payload["leverage_applied"],
+                "holdout_accessed": payload["holdout_accessed"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _sealed_holdout(args: argparse.Namespace) -> int:
+    payload = run_holdout(
+        args.study_file,
+        args.selection_result,
+        args.holdout_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    evaluation = payload["evaluation"]
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "holdout_fingerprint_sha256": payload["holdout_fingerprint_sha256"],
+                "source_selected_set_fingerprint_sha256": payload[
+                    "source_selected_set_fingerprint_sha256"
+                ],
+                "status": payload["status"],
+                "failure_reasons": payload["failure_reasons"],
+                "selected_count": payload["selected_count"],
+                "closed_trade_count": evaluation["closed_trade_count"],
+                "fixed_baseline_total_return_pct": evaluation[
+                    "fixed_baseline_total_return_pct"
+                ],
+                "positive_window_fraction": evaluation[
+                    "positive_window_fraction"
+                ],
+                "strategy_parameters_retuned": payload[
+                    "strategy_parameters_retuned"
+                ],
+                "selection_gates_retuned": payload["selection_gates_retuned"],
+                "priority_reoptimized": payload["priority_reoptimized"],
                 "holdout_accessed": payload["holdout_accessed"],
             },
             indent=2,

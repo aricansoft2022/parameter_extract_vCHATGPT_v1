@@ -17,10 +17,10 @@ The project is intentionally built as a chain of research gates rather than a pr
 8. **Strategy families** — ROBUST frozen centers are grouped by tolerant raw-signal overlap, accepted-entry overlap, position-exposure overlap and normalized parameter distance using conservative complete-link clustering.
 9. **Shared-slot portfolio replay** — family representatives are replayed concurrently from raw signals with finite slots, explicit priority and `PENDING_ENTRY` slot reservation.
 10. **One-pass portfolio selection** — each family is removed once from the full portfolio, predeclared marginal gates yield KEEP/DROP, survivors retain original relative priority, and no iterative subset search is allowed.
+11. **Sealed holdout evaluation** — the exact selected-set fingerprint, slot count and priority order are replayed on holdout windows only against predeclared PASS/FAIL gates; no repair or retuning path exists inside the evaluator.
 
 Still intentionally deferred:
 
-- sealed holdout evaluation/promotion;
 - risk/leverage policy;
 - ccbot `teams.csv` export;
 - factorized/high-throughput search for very large grids.
@@ -34,10 +34,10 @@ Still intentionally deferred:
 - **Families deduplicate; they do not invent.** A family representative is an existing ROBUST frozen center, never a synthesized midpoint.
 - **Portfolio priority is declared, not optimized.** Shared-slot replay uses an explicit family order.
 - **Selection is one-pass, not a subset optimizer.** DROP decisions do not trigger repeated leave-one-out retesting.
-- **Holdout stays sealed until the selected-set fingerprint is frozen.**
+- **Holdout evaluates; it never repairs.** A FAIL cannot be converted into a PASS by loosening gates, changing strategies, dropping families or reordering priority on the same holdout data.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
-- **Leverage is a risk layer, not an alpha parameter.** Search and selection remain leverage-free.
+- **Leverage is a risk layer, not an alpha parameter.** Search, selection and holdout remain leverage-free.
 - **Open-at-end is censored data.** The engine never fabricates an exit at a calendar or study-window boundary.
 
 ## Setup
@@ -149,7 +149,7 @@ pextract study \
   --output study-result.json
 ```
 
-Holdout is omitted unless `--reveal-holdout` is explicitly supplied.
+Holdout is omitted unless `--reveal-holdout` is explicitly supplied. The normal research pipeline does not use that generic reveal path; final portfolio evaluation uses the stricter sealed-holdout contract below.
 
 ## Discovery search
 
@@ -243,6 +243,25 @@ pextract select-portfolio \
 
 Each representative is removed exactly once from the full portfolio. Predeclared gates inspect discovery/validation marginal return, validation sample size, drawdown worsening and contention added to other families. KEEP/DROP decisions are simultaneous; survivors are replayed once without parameter retuning or priority reoptimization. The result has a self-verifying selected-set fingerprint and still records `holdout_accessed: false`.
 
+## Sealed holdout
+
+See [`docs/HOLDOUT.md`](docs/HOLDOUT.md).
+
+Write `holdout.json` before revealing holdout results. It pins both the exact selection-result file SHA-256 and the exact selected-set fingerprint, plus the final PASS/FAIL gates.
+
+```bash
+pextract sealed-holdout \
+  --study study.json \
+  --selection-result selection-result.json \
+  --holdout holdout.json \
+  --data-directory . \
+  --output holdout-result.json
+```
+
+The evaluator replays only the study's holdout windows. Strategies, selection gates, slot count and relative priority are frozen. The output records `holdout_accessed: true` and independently recomputes the selected-set fingerprint from its stored selected rows, original priorities, source portfolio SHA and slot count.
+
+A FAIL is a final result for that research lineage, not a tuning prompt. Once holdout observations influence a change, that period is no longer sealed holdout data for the changed design.
+
 ## Funding CSV
 
 ```text
@@ -254,4 +273,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-Freeze the selection result and evaluate that exact selected set on the sealed holdout without changing gates, strategies, slot count or relative priority. Only after that boundary should a separate risk/leverage layer and ccbot-compatible `teams.csv` export be considered.
+A sealed-holdout PASS completes the leverage-free alpha/portfolio research lineage. The next layer should be an explicit risk policy: leverage bounds, liquidation-distance stress, allocation/reserve assumptions and deployment sizing. Only after that policy is frozen should a ccbot-compatible `teams.csv` be exported.
