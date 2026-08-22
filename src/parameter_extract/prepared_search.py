@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .models import StrategySpec
 from .prepared import PreparedDiscovery, evaluate_prepared_discovery, prepare_discovery
@@ -10,6 +10,7 @@ from .search import (
     PARETO_OBJECTIVES,
     _aggregate,
     _coarse_candidates,
+    _evaluate_candidate,
     _pareto_frontier,
     _passes_gates,
     _refined_candidates,
@@ -22,6 +23,7 @@ from .study import StudyContext, load_study_context, study_fingerprint
 
 PREPARED_SEARCH_ENGINE = "prepared_exact_v1"
 REFERENCE_ENGINE = "truth_replay"
+RUNTIME_PARITY_SAMPLE_SIZE = 3
 
 
 def run_prepared_search(
@@ -30,12 +32,16 @@ def run_prepared_search(
     *,
     data_directory: str | Path,
 ) -> dict[str, Any]:
-    """Run the existing discovery search semantics with reusable indicator state.
+    """Run existing discovery-search semantics with reusable indicator state.
 
     This is an exact prepared path, not yet the threshold-inverted/factorized engine.
     Candidate generation, gates, Pareto objectives and refinement ordering are imported
     from the reference search implementation. Entry/exit execution still uses the shared
     truth replay through ``evaluate_prepared_discovery``.
+
+    Before the bulk loop begins, a small deterministic sample from the actual study/grid
+    is evaluated by both the truth and prepared paths. Any mismatch aborts the run. This
+    keeps parity tied to the concrete dataset/execution assumptions, not only CI fixtures.
     """
 
     context = load_study_context(study_path, data_directory=data_directory)
@@ -50,6 +56,13 @@ def run_prepared_search(
             f"coarse grid has {len(coarse)} candidates, above max_candidates="
             f"{spec.refinement.max_candidates}; widen steps before running"
         )
+
+    parity_checked = _runtime_parity_check(
+        context,
+        prepared,
+        coarse,
+        sample_size=RUNTIME_PARITY_SAMPLE_SIZE,
+    )
 
     evaluated: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -109,6 +122,8 @@ def run_prepared_search(
         "holdout_accessed": False,
         "search_engine": PREPARED_SEARCH_ENGINE,
         "reference_engine": REFERENCE_ENGINE,
+        "runtime_parity_checked_candidates": parity_checked,
+        "runtime_parity_passed": True,
         "indicator_cache_rsi_periods": list(prepared.rsi_periods),
         "prepared_discovery_window_count": len(prepared.windows),
         "pareto_objectives": list(PARETO_OBJECTIVES),
@@ -123,6 +138,32 @@ def run_prepared_search(
         "pareto_candidates": len(frontier),
         "frontier": frontier,
     }
+
+
+def _runtime_parity_check(
+    context: StudyContext,
+    prepared: PreparedDiscovery,
+    candidates: Sequence[StrategySpec],
+    *,
+    sample_size: int,
+) -> int:
+    if sample_size < 1:
+        raise ValueError("runtime parity sample_size must be positive")
+    sample = list(candidates[:sample_size])
+    for index, strategy in enumerate(sample):
+        truth = _evaluate_candidate(context, strategy, stage="coarse")
+        fast = _evaluate_prepared_candidate(
+            context,
+            prepared,
+            strategy,
+            stage="coarse",
+        )
+        if fast != truth:
+            raise RuntimeError(
+                "prepared search runtime parity failed for deterministic sample "
+                f"{index}: {asdict(strategy)}"
+            )
+    return len(sample)
 
 
 def _evaluate_prepared_candidate(
