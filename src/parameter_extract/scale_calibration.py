@@ -5,18 +5,19 @@ import hashlib
 import json
 import os
 import platform
-import sys
 import time
 import tracemalloc
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .bulk_search import run_bulk_search
 from .search import load_search_json, search_fingerprint
 from .study import load_study_json, study_fingerprint
 
 CALIBRATION_SCHEMA_VERSION = 1
+CALIBRATION_RESULT_SCHEMA_VERSION = 1
+CALIBRATION_ENGINE = "bulk_entry_membership_exact_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,10 @@ def load_scale_calibration_json(path: str | Path) -> ScaleCalibrationSpec:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("schema_version") != CALIBRATION_SCHEMA_VERSION:
         raise ValueError("unsupported scale-calibration schema_version")
+    return _spec_from_payload(payload)
+
+
+def _spec_from_payload(payload: dict[str, Any]) -> ScaleCalibrationSpec:
     return ScaleCalibrationSpec(
         name=str(payload["name"]),
         study_file=str(payload["study_file"]),
@@ -100,7 +105,27 @@ def load_scale_calibration_json(path: str | Path) -> ScaleCalibrationSpec:
 
 def scale_calibration_fingerprint(spec: ScaleCalibrationSpec) -> str:
     canonical = json.dumps(
-        asdict(spec), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        asdict(spec),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def scale_calibration_result_fingerprint(payload: dict[str, Any]) -> str:
+    stable = {
+        key: value
+        for key, value in payload.items()
+        if key != "scale_calibration_result_fingerprint_sha256"
+    }
+    canonical = json.dumps(
+        stable,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -110,10 +135,10 @@ def run_scale_calibration(
     *,
     data_directory: str | Path,
 ) -> dict[str, Any]:
-    calibration_file = Path(calibration_path)
+    calibration_file = Path(calibration_path).resolve()
     spec = load_scale_calibration_json(calibration_file)
     root = calibration_file.parent
-    study_path = (root / spec.study_file).resolve()
+    study_path = _resolve_contract_path(root, spec.study_file, label="study_file")
     study = load_study_json(study_path)
     current_study_fp = study_fingerprint(study)
     if current_study_fp != spec.study_fingerprint_sha256:
@@ -126,7 +151,9 @@ def run_scale_calibration(
     stopped_after_stage: str | None = None
 
     for stage in spec.stages:
-        search_path = (root / stage.search_file).resolve()
+        search_path = _resolve_contract_path(
+            root, stage.search_file, label=f"stage {stage.name!r} search_file"
+        )
         search_spec = load_search_json(search_path)
         current_search_fp = search_fingerprint(search_spec)
         if current_search_fp != stage.search_fingerprint_sha256:
@@ -164,6 +191,12 @@ def run_scale_calibration(
                 "search_fingerprint_sha256": current_search_fp,
                 "expected_max_candidates": stage.expected_max_candidates,
                 "min_evaluated_candidates": stage.min_evaluated_candidates,
+                "result_kind": result.get("kind"),
+                "engine": result.get("search_engine"),
+                "validation_accessed": result.get("validation_accessed"),
+                "holdout_accessed": result.get("holdout_accessed"),
+                "study_fingerprint_sha256": result.get("study_fingerprint_sha256"),
+                "dataset_fingerprint_sha256": result.get("dataset_fingerprint_sha256"),
                 "evaluated_candidates": result.get("evaluated_candidates"),
                 "coarse_candidates": result.get("coarse_candidates"),
                 "refined_candidates": result.get("refined_candidates"),
@@ -205,15 +238,15 @@ def run_scale_calibration(
             break
         safe_max_candidates = stage.expected_max_candidates
 
-    return {
-        "schema_version": 1,
+    payload: dict[str, Any] = {
+        "schema_version": CALIBRATION_RESULT_SCHEMA_VERSION,
         "kind": "parameter_extract.scale_calibration_result",
         "calibration": spec.name,
         "calibration_fingerprint_sha256": scale_calibration_fingerprint(spec),
         "calibration_spec": asdict(spec),
         "study_fingerprint_sha256": current_study_fp,
         "dataset_fingerprint_sha256": spec.dataset_fingerprint_sha256,
-        "engine": "bulk_entry_membership_exact_v1",
+        "engine": CALIBRATION_ENGINE,
         "machine": _machine_metadata(),
         "resource_measurement": {
             "elapsed": "time.perf_counter wall clock per complete stage run",
@@ -227,6 +260,104 @@ def run_scale_calibration(
         "stopped_after_stage": stopped_after_stage,
         "stage_results": results,
     }
+    payload["scale_calibration_result_fingerprint_sha256"] = (
+        scale_calibration_result_fingerprint(payload)
+    )
+    problems = verify_scale_calibration_result(payload)
+    if problems:
+        raise RuntimeError(
+            "generated scale-calibration result failed self-verification: "
+            + "; ".join(problems)
+        )
+    return payload
+
+
+def verify_scale_calibration_result(payload: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    if payload.get("schema_version") != CALIBRATION_RESULT_SCHEMA_VERSION:
+        problems.append("unsupported scale-calibration result schema_version")
+    if payload.get("kind") != "parameter_extract.scale_calibration_result":
+        problems.append("scale-calibration result kind is invalid")
+    if payload.get("engine") != CALIBRATION_ENGINE:
+        problems.append("scale-calibration engine is unsupported")
+    if payload.get("fail_closed") is not True:
+        problems.append("scale calibration must be fail_closed")
+    if payload.get("auto_raises_candidate_cap") is not False:
+        problems.append("scale calibration must not auto-raise candidate caps")
+
+    spec_payload = payload.get("calibration_spec")
+    spec: ScaleCalibrationSpec | None = None
+    if not isinstance(spec_payload, dict):
+        problems.append("calibration_spec is missing or invalid")
+    else:
+        try:
+            spec = _spec_from_payload(spec_payload)
+            if payload.get("calibration") != spec.name:
+                problems.append("calibration name does not match calibration_spec")
+            if payload.get("calibration_fingerprint_sha256") != scale_calibration_fingerprint(spec):
+                problems.append("calibration fingerprint does not match calibration_spec")
+            if payload.get("study_fingerprint_sha256") != spec.study_fingerprint_sha256:
+                problems.append("result study fingerprint does not match calibration_spec")
+            if payload.get("dataset_fingerprint_sha256") != spec.dataset_fingerprint_sha256:
+                problems.append("result dataset fingerprint does not match calibration_spec")
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"calibration_spec is invalid: {exc}")
+
+    stages = payload.get("stage_results")
+    if not isinstance(stages, list):
+        problems.append("stage_results is missing or invalid")
+    elif spec is not None:
+        if len(stages) > len(spec.stages):
+            problems.append("stage_results contains more stages than calibration_spec")
+        first_failure: str | None = None
+        last_safe: int | None = None
+        for index, row in enumerate(stages):
+            if index >= len(spec.stages):
+                break
+            stage = spec.stages[index]
+            if not isinstance(row, dict):
+                problems.append(f"stage result {index} is invalid")
+                continue
+            if row.get("name") != stage.name:
+                problems.append(f"stage result {index} name/order does not match contract")
+            expected_failures = _stored_stage_failures(
+                stage,
+                row,
+                expected_study_fp=spec.study_fingerprint_sha256,
+                expected_dataset_fp=spec.dataset_fingerprint_sha256,
+            )
+            expected_status = "PASS" if not expected_failures else "FAIL"
+            if row.get("failure_reasons") != expected_failures:
+                problems.append(f"stage result {index} failure reasons do not match evidence")
+            if row.get("status") != expected_status:
+                problems.append(f"stage result {index} status does not match evidence")
+            if first_failure is None and expected_status == "FAIL":
+                first_failure = stage.name
+                if index != len(stages) - 1:
+                    problems.append("stage_results continued after the first failed stage")
+            if first_failure is None and expected_status == "PASS":
+                last_safe = stage.expected_max_candidates
+
+        expected_all_passed = (
+            len(stages) == len(spec.stages)
+            and bool(stages)
+            and first_failure is None
+        )
+        if payload.get("all_stages_passed") != expected_all_passed:
+            problems.append("all_stages_passed is inconsistent with stage results")
+        if payload.get("safe_max_candidates") != last_safe:
+            problems.append("safe_max_candidates is inconsistent with stage results")
+        if payload.get("stopped_after_stage") != first_failure:
+            problems.append("stopped_after_stage is inconsistent with stage results")
+
+    expected_result_fp = payload.get("scale_calibration_result_fingerprint_sha256")
+    try:
+        actual_result_fp = scale_calibration_result_fingerprint(payload)
+        if expected_result_fp != actual_result_fp:
+            problems.append("scale-calibration result fingerprint mismatch")
+    except (TypeError, ValueError) as exc:
+        problems.append(f"scale-calibration result fingerprint cannot be recomputed: {exc}")
+    return problems
 
 
 def _measure_stage(
@@ -261,36 +392,107 @@ def _stage_failures(
     expected_dataset_fp: str,
     expected_search_fp: str,
 ) -> list[str]:
-    failures: list[str] = []
-    if result.get("kind") != "parameter_extract.discovery_search":
-        failures.append("RESULT_KIND")
-    if result.get("search_engine") != "bulk_entry_membership_exact_v1":
-        failures.append("ENGINE_IDENTITY")
-    if result.get("runtime_parity_passed") is not True:
-        failures.append("PARITY")
-    if result.get("validation_accessed") is not False or result.get("holdout_accessed") is not False:
-        failures.append("PHASE_ISOLATION")
-    if result.get("study_fingerprint_sha256") != expected_study_fp:
-        failures.append("STUDY_FINGERPRINT")
-    if result.get("dataset_fingerprint_sha256") != expected_dataset_fp:
-        failures.append("DATASET_FINGERPRINT")
-    if result.get("search_fingerprint_sha256") != expected_search_fp:
+    evidence = {
+        "search_file": stage.search_file,
+        "search_fingerprint_sha256": result.get("search_fingerprint_sha256"),
+        "expected_max_candidates": stage.expected_max_candidates,
+        "min_evaluated_candidates": stage.min_evaluated_candidates,
+        "result_kind": result.get("kind"),
+        "engine": result.get("search_engine"),
+        "validation_accessed": result.get("validation_accessed"),
+        "holdout_accessed": result.get("holdout_accessed"),
+        "study_fingerprint_sha256": result.get("study_fingerprint_sha256"),
+        "dataset_fingerprint_sha256": result.get("dataset_fingerprint_sha256"),
+        "evaluated_candidates": result.get("evaluated_candidates"),
+        "elapsed_seconds": elapsed_seconds,
+        "peak_python_heap_mb": peak_heap_mb,
+        "max_elapsed_seconds": stage.max_elapsed_seconds,
+        "max_peak_python_heap_mb": stage.max_peak_python_heap_mb,
+        "runtime_parity_passed": result.get("runtime_parity_passed"),
+        "entry_signal_cache_misses": result.get("entry_signal_cache_misses"),
+        "query_work_profile": result.get("query_work_profile"),
+    }
+    failures = _stored_stage_failures(
+        stage,
+        evidence,
+        expected_study_fp=expected_study_fp,
+        expected_dataset_fp=expected_dataset_fp,
+    )
+    if result.get("search_fingerprint_sha256") != expected_search_fp and "SEARCH_FINGERPRINT" not in failures:
         failures.append("SEARCH_FINGERPRINT")
-    if result.get("entry_signal_cache_misses") != 0:
+    return failures
+
+
+def _stored_stage_failures(
+    stage: CalibrationStage,
+    row: dict[str, Any],
+    *,
+    expected_study_fp: str,
+    expected_dataset_fp: str,
+) -> list[str]:
+    stored = row.get("failure_reasons")
+    if stored == ["ENGINE_ERROR"] or row.get("error_type") is not None:
+        if not isinstance(row.get("error_type"), str) or not isinstance(row.get("error_message"), str):
+            return ["ENGINE_ERROR_METADATA"]
+        return ["ENGINE_ERROR"]
+
+    failures: list[str] = []
+    if row.get("result_kind") != "parameter_extract.discovery_search":
+        failures.append("RESULT_KIND")
+    if row.get("engine") != CALIBRATION_ENGINE:
+        failures.append("ENGINE_IDENTITY")
+    if row.get("runtime_parity_passed") is not True:
+        failures.append("PARITY")
+    if row.get("validation_accessed") is not False or row.get("holdout_accessed") is not False:
+        failures.append("PHASE_ISOLATION")
+    if row.get("study_fingerprint_sha256") != expected_study_fp:
+        failures.append("STUDY_FINGERPRINT")
+    if row.get("dataset_fingerprint_sha256") != expected_dataset_fp:
+        failures.append("DATASET_FINGERPRINT")
+    if row.get("search_fingerprint_sha256") != stage.search_fingerprint_sha256:
+        failures.append("SEARCH_FINGERPRINT")
+    if row.get("search_file") != stage.search_file:
+        failures.append("SEARCH_FILE")
+    if row.get("expected_max_candidates") != stage.expected_max_candidates:
+        failures.append("CANDIDATE_BUDGET_CONTRACT")
+    if row.get("min_evaluated_candidates") != stage.min_evaluated_candidates:
+        failures.append("MIN_EVALUATED_CONTRACT")
+    if row.get("entry_signal_cache_misses") != 0:
         failures.append("BULK_FALLBACK_MISS")
-    evaluated = result.get("evaluated_candidates")
+    evaluated = row.get("evaluated_candidates")
     if not isinstance(evaluated, int) or evaluated < stage.min_evaluated_candidates:
         failures.append("INSUFFICIENT_SCALE_EXERCISE")
     if isinstance(evaluated, int) and evaluated > stage.expected_max_candidates:
         failures.append("CANDIDATE_BUDGET_EXCEEDED")
-    if elapsed_seconds > stage.max_elapsed_seconds:
+    elapsed = row.get("elapsed_seconds")
+    if not isinstance(elapsed, (int, float)) or elapsed < 0.0:
+        failures.append("ELAPSED_MEASUREMENT")
+    elif elapsed > stage.max_elapsed_seconds:
         failures.append("ELAPSED_TIME")
-    if peak_heap_mb > stage.max_peak_python_heap_mb:
+    peak = row.get("peak_python_heap_mb")
+    if not isinstance(peak, (int, float)) or peak < 0.0:
+        failures.append("PYTHON_HEAP_MEASUREMENT")
+    elif peak > stage.max_peak_python_heap_mb:
         failures.append("PYTHON_HEAP")
-    profile = result.get("query_work_profile")
+    if row.get("max_elapsed_seconds") != stage.max_elapsed_seconds:
+        failures.append("ELAPSED_LIMIT_CONTRACT")
+    if row.get("max_peak_python_heap_mb") != stage.max_peak_python_heap_mb:
+        failures.append("PYTHON_HEAP_LIMIT_CONTRACT")
+    profile = row.get("query_work_profile")
     if not isinstance(profile, dict) or profile.get("candidate_evaluations") != evaluated:
         failures.append("WORK_PROFILE")
     return failures
+
+
+def _resolve_contract_path(root: Path, relative: str, *, label: str) -> Path:
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        raise ValueError(f"{label} must be relative to the calibration file")
+    root_resolved = root.resolve()
+    resolved = (root_resolved / candidate).resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise ValueError(f"{label} escapes the calibration directory")
+    return resolved
 
 
 def _machine_metadata() -> dict[str, Any]:
@@ -300,7 +502,6 @@ def _machine_metadata() -> dict[str, Any]:
         "platform": platform.platform(),
         "machine": platform.machine(),
         "cpu_count": os.cpu_count(),
-        "executable": sys.executable,
     }
 
 
