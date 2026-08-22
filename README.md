@@ -19,11 +19,11 @@ The project is intentionally built as a chain of research gates rather than a pr
 10. **One-pass portfolio selection** — each family is removed once from the full portfolio, predeclared marginal gates yield KEEP/DROP, survivors retain original relative priority, and no iterative subset search is allowed.
 11. **Sealed holdout evaluation** — the exact selected-set fingerprint, slot count and priority order are replayed on holdout windows only against predeclared PASS/FAIL gates; no repair or retuning path exists inside the evaluator.
 12. **Post-holdout MAE risk budget** — a PASS selected portfolio is stress-budgeted from observed adverse excursions without alpha retuning or leverage-profit optimization. Allocation must preserve the researched slot count.
+13. **Binance exchange-risk gate** — provisional leverage is checked against a pinned production USD-M leverage-bracket snapshot, a declared capital envelope and real Binance-reported isolated-long liquidation-price parity fixtures.
 
 Still intentionally deferred:
 
-- exchange-specific liquidation / maintenance-margin validation;
-- ccbot `teams.csv` export;
+- ccbot `teams.csv` export and deployment manifest;
 - factorized/high-throughput search for very large grids.
 
 ## Core research rules
@@ -37,6 +37,7 @@ Still intentionally deferred:
 - **Selection is one-pass, not a subset optimizer.** DROP decisions do not trigger repeated leave-one-out retesting.
 - **Holdout evaluates; it never repairs.** A FAIL cannot be converted into a PASS by loosening gates, changing strategies, dropping families or reordering priority on the same holdout data.
 - **Leverage is budgeted, not optimized.** Post-holdout risk policy derives an MAE-based ceiling; it does not search leverage for historical profit.
+- **Exchange liquidation must be parity-validated.** A derived formula and synthetic tests cannot unlock export without real Binance-reported isolated liquidation fixtures.
 - **Risk cannot silently change the sealed set.** Insufficient evidence for one selected family blocks deployment rather than removing the family after holdout.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
@@ -268,8 +269,6 @@ A FAIL is a final result for that research lineage, not a tuning prompt. Once ho
 
 See [`docs/RISK.md`](docs/RISK.md).
 
-The risk stage requires a PASS sealed holdout and an exact risk contract pinned to that holdout result:
-
 ```bash
 pextract risk-budget \
   --selection-result selection-result.json \
@@ -282,14 +281,32 @@ It combines closed-trade MAE evidence for the frozen selected portfolio across d
 
 `allocation_pct` must imply the same number of slots used during portfolio research. If one selected family lacks the required MAE sample, the risk stage returns `BLOCK` rather than silently deleting the family after holdout.
 
-Even a `RISK_BUDGET_PASS` still records:
+## Binance USD-M exchange-risk gate
 
-```text
-exchange_liquidation_validated: false
-teams_export_ready: false
+See [`docs/EXCHANGE_RISK.md`](docs/EXCHANGE_RISK.md).
+
+The final pre-export risk gate consumes the `RISK_BUDGET_PASS`, an exact production account bracket snapshot and a predeclared exchange-risk contract:
+
+```bash
+pextract exchange-risk \
+  --risk-result risk-result.json \
+  --exchange-snapshot exchange-snapshot.json \
+  --exchange-risk exchange-risk.json \
+  --output exchange-risk-result.json
 ```
 
-The MAE budget is not a Binance liquidation-price formula.
+V1 supports only the live bot's intended simple configuration: USDT margin, isolated margin, one-way mode, auto-add-margin disabled and long positions. It models the maintenance-margin ladder with each bracket's `maintMarginRatio` and `cum`, tests the declared baseline-capital envelope around bracket boundaries, and verifies that the proposed leverage is permitted at every tested notional.
+
+Because Binance does not expose the derived liquidation equation as a stable API contract, export cannot be unlocked by algebra or synthetic unit tests alone. The supplied snapshot must contain real Binance `/fapi/v3/positionRisk` isolated-long liquidation fixtures and the model must reproduce them within the predeclared basis-point tolerance.
+
+Only `EXCHANGE_RISK_PASS` sets:
+
+```text
+exchange_liquidation_validated: true
+teams_export_ready: true
+```
+
+This does not change strategies, family membership, priority or leverage.
 
 ## Funding CSV
 
@@ -302,4 +319,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-Validate the provisional risk-budget leverage against identified Binance USD-M isolated-margin mechanics: leverage brackets, maintenance margin and liquidation behavior. That stage must use a pinned exchange-rules snapshot and a verified liquidation model. Only after it passes should `teams.csv` export be allowed.
+Build the final ccbot-compatible `teams.csv` exporter plus a deployment manifest that pins the complete research lineage, approved baseline-capital range, allocation/reserve policy, leverage, selected-set fingerprint, exchange snapshot and source commit. The exporter should refuse any input that is not `EXCHANGE_RISK_PASS` with `teams_export_ready: true`.
