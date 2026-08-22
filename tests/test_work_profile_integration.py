@@ -102,6 +102,7 @@ def test_query_and_bulk_work_profiles_cover_only_real_candidate_evaluations(
     assert profile["exit_lookup_requests"] == profile["accepted_positions"]
     assert profile["excursion_range_requests"] == profile["accepted_positions"]
     assert profile["closed_trade_signal_bisects"] == profile["closed_trades"]
-    assert profile["funding_event_checks"] >= profile["accepted_positions"]
+    assert 0 <= profile["funding_range_bisects"] <= 2 * profile["accepted_positions"]
+    assert 0 <= profile["funding_event_checks"] < profile["accepted_positions"]
     assert query["runtime_parity_passed"] is True
     assert bulk["runtime_parity_passed"] is True
