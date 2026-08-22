@@ -10,6 +10,7 @@ from parameter_extract.holdout import run_holdout, verify_holdout_result
 from parameter_extract.manifest import sha256_file
 from parameter_extract.models import ExecutionModel
 from parameter_extract.promotion import candidate_fingerprint
+from parameter_extract.selection import _selection_set_fingerprint
 
 
 def _strategy(entry: float) -> dict:
@@ -28,29 +29,37 @@ def _strategy(entry: float) -> dict:
 def _selection_result() -> dict:
     strategy_a = _strategy(30.0)
     strategy_b = _strategy(31.0)
+    source_portfolio_sha = "d" * 64
+    selected = [
+        {
+            "priority": 1,
+            "original_priority": 1,
+            "family_id": "F0001",
+            "candidate_fingerprint_sha256": candidate_fingerprint(strategy_a),
+            "strategy": strategy_a,
+        },
+        {
+            "priority": 2,
+            "original_priority": 3,
+            "family_id": "F0002",
+            "candidate_fingerprint_sha256": candidate_fingerprint(strategy_b),
+            "strategy": strategy_b,
+        },
+    ]
+    selected_fp = _selection_set_fingerprint(
+        source_portfolio_sha=source_portfolio_sha,
+        slot_count=2,
+        selected=selected,
+    )
     return {
         "study_fingerprint_sha256": "b" * 64,
         "dataset_fingerprint_sha256": "a" * 64,
         "symbol": "BTCUSDT",
         "execution": asdict(ExecutionModel.expected_live()),
+        "source_portfolio_result_sha256": source_portfolio_sha,
         "slot_count": 2,
-        "selected_set_fingerprint_sha256": "c" * 64,
-        "selected": [
-            {
-                "priority": 1,
-                "original_priority": 1,
-                "family_id": "F0001",
-                "candidate_fingerprint_sha256": candidate_fingerprint(strategy_a),
-                "strategy": strategy_a,
-            },
-            {
-                "priority": 2,
-                "original_priority": 3,
-                "family_id": "F0002",
-                "candidate_fingerprint_sha256": candidate_fingerprint(strategy_b),
-                "strategy": strategy_b,
-            },
-        ],
+        "selected_set_fingerprint_sha256": selected_fp,
+        "selected": selected,
     }
 
 
@@ -81,8 +90,9 @@ def _window(name: str, return_pct: float, *, trades: int, drawdown: float) -> di
 
 
 def _write_contracts(tmp_path: Path) -> tuple[Path, Path]:
+    selection = _selection_result()
     selection_path = tmp_path / "selection-result.json"
-    selection_path.write_text(json.dumps(_selection_result()), encoding="utf-8")
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
     holdout_path = tmp_path / "holdout.json"
     holdout_path.write_text(
         json.dumps(
@@ -90,7 +100,9 @@ def _write_contracts(tmp_path: Path) -> tuple[Path, Path]:
                 "schema_version": 1,
                 "name": "sealed-final",
                 "source_selection_result_sha256": sha256_file(selection_path),
-                "source_selected_set_fingerprint_sha256": "c" * 64,
+                "source_selected_set_fingerprint_sha256": selection[
+                    "selected_set_fingerprint_sha256"
+                ],
                 "gates": {
                     "min_total_closed_trades": 3,
                     "min_positive_window_fraction": 0.5,
@@ -152,6 +164,7 @@ def test_holdout_uses_only_sealed_windows_and_frozen_selected_order(tmp_path: Pa
     assert result["slot_count_changed"] is False
     assert result["priority_reoptimized"] is False
     assert [row["family_id"] for row in result["selected"]] == ["F0001", "F0002"]
+    assert [row["original_priority"] for row in result["selected"]] == [1, 3]
     assert calls == [
         ("holdout", "h1", ("F0001", "F0002"), 2),
         ("holdout", "h2", ("F0001", "F0002"), 2),
@@ -173,14 +186,14 @@ def test_holdout_contract_pins_exact_selection_file_and_selected_set(tmp_path: P
     selection_path.write_text(json.dumps(_selection_result()), encoding="utf-8")
     holdout = json.loads(holdout_path.read_text(encoding="utf-8"))
     holdout["source_selection_result_sha256"] = sha256_file(selection_path)
-    holdout["source_selected_set_fingerprint_sha256"] = "d" * 64
+    holdout["source_selected_set_fingerprint_sha256"] = "e" * 64
     holdout_path.write_text(json.dumps(holdout), encoding="utf-8")
     monkeypatch.setattr(holdout_module, "verify_selection_result", lambda payload: [])
     with pytest.raises(ValueError, match="different selected-set fingerprint"):
         run_holdout("study.json", selection_path, holdout_path, data_directory=tmp_path)
 
 
-def test_holdout_result_detects_strategy_and_phase_mutation(tmp_path: Path, monkeypatch):
+def test_holdout_result_detects_selected_set_and_phase_mutation(tmp_path: Path, monkeypatch):
     selection_path, holdout_path = _write_contracts(tmp_path)
     monkeypatch.setattr(holdout_module, "load_study_context", lambda *a, **k: _context())
     monkeypatch.setattr(holdout_module, "study_fingerprint", lambda _spec: "b" * 64)
@@ -198,7 +211,14 @@ def test_holdout_result_detects_strategy_and_phase_mutation(tmp_path: Path, monk
 
     mutated = json.loads(json.dumps(result))
     mutated["selected"][0]["strategy"]["rsi_entry"] = 29.0
-    assert any("strategy fingerprint mismatch" in p for p in verify_holdout_result(mutated))
+    problems = verify_holdout_result(mutated)
+    assert any("strategy fingerprint mismatch" in p for p in problems)
+    assert any("selected-set fingerprint" in p for p in problems)
+
+    mutated = json.loads(json.dumps(result))
+    mutated["selected"][1]["original_priority"] = 0
+    problems = verify_holdout_result(mutated)
+    assert any("original priority" in p for p in problems)
 
     mutated = json.loads(json.dumps(result))
     mutated["windows"][0]["phase"] = "validation"
