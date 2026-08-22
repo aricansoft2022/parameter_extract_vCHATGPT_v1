@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,6 +21,7 @@ from .promotion import candidate_fingerprint
 from .study import StudyContext, load_study_context, study_fingerprint
 
 SELECTION_SCHEMA_VERSION = 1
+SELECTION_ALGORITHM = "one_pass_full_portfolio_leave_one_out_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,17 +33,26 @@ class SelectionGates:
     max_validation_contention_added_fraction: float | None = None
 
     def __post_init__(self) -> None:
+        for name in (
+            "min_discovery_marginal_return_pct",
+            "min_validation_marginal_return_pct",
+        ):
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"{name} must be finite")
         if self.min_validation_accepted_entries < 0:
             raise ValueError("min_validation_accepted_entries cannot be negative")
-        if (
-            self.max_validation_drawdown_worsening_pct is not None
-            and self.max_validation_drawdown_worsening_pct < 0.0
-        ):
-            raise ValueError("max_validation_drawdown_worsening_pct cannot be negative")
-        if self.max_validation_contention_added_fraction is not None and not (
-            0.0 <= self.max_validation_contention_added_fraction <= 1.0
-        ):
-            raise ValueError("max_validation_contention_added_fraction must be inside [0, 1]")
+        if self.max_validation_drawdown_worsening_pct is not None:
+            value = float(self.max_validation_drawdown_worsening_pct)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    "max_validation_drawdown_worsening_pct must be finite and non-negative"
+                )
+        if self.max_validation_contention_added_fraction is not None:
+            value = float(self.max_validation_contention_added_fraction)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    "max_validation_contention_added_fraction must be finite and inside [0, 1]"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,19 +130,30 @@ def run_selection(
     actual_families_sha = sha256_file(families_path)
     if portfolio_result.get("source_families_result_sha256") != actual_families_sha:
         raise ValueError("portfolio result is pinned to a different families-result file")
-    if portfolio_result.get("study_fingerprint_sha256") != study_fingerprint(context.spec):
-        raise ValueError("portfolio result belongs to a different study contract")
-    if portfolio_result.get("dataset_fingerprint_sha256") != context.spec.dataset_fingerprint_sha256:
-        raise ValueError("portfolio result belongs to a different dataset")
-    if portfolio_result.get("symbol") != context.spec.symbol:
-        raise ValueError("portfolio-result symbol does not match the study")
-    if portfolio_result.get("execution") != asdict(context.spec.execution):
-        raise ValueError("portfolio-result execution assumptions do not match the study")
+
+    current_study_fp = study_fingerprint(context.spec)
+    for label, payload in (
+        ("families", families_result),
+        ("portfolio", portfolio_result),
+    ):
+        if payload.get("study_fingerprint_sha256") != current_study_fp:
+            raise ValueError(f"{label} result belongs to a different study contract")
+        if payload.get("dataset_fingerprint_sha256") != context.spec.dataset_fingerprint_sha256:
+            raise ValueError(f"{label} result belongs to a different dataset")
+        if payload.get("symbol") != context.spec.symbol:
+            raise ValueError(f"{label} result symbol does not match the study")
+        if payload.get("execution") != asdict(context.spec.execution):
+            raise ValueError(f"{label} result execution assumptions do not match the study")
 
     portfolio_spec = _portfolio_spec_from_result(portfolio_result)
     representatives = {
         row["family_id"]: row for row in families_result["representatives"]
     }
+    _verify_portfolio_priorities_match_families(
+        portfolio_result,
+        representatives,
+        portfolio_spec,
+    )
     candidates = tuple(
         _Candidate(
             family_id=family_id,
@@ -194,7 +216,7 @@ def run_selection(
     if not selected:
         raise ValueError("selection gates dropped every family representative")
 
-    # Preserve original relative priority. No reordering occurs after marginal evidence.
+    # Preserve original relative priority. No permutation or iterative subset search occurs.
     selected = sorted(selected, key=lambda row: row.priority)
     selected_windows = _replay_candidate_set(
         context,
@@ -221,7 +243,7 @@ def run_selection(
         slot_count=portfolio_spec.slot_count,
         selected=selection_set,
     )
-    return {
+    payload = {
         "schema_version": 1,
         "kind": "parameter_extract.portfolio_selection",
         "selection": spec.name,
@@ -229,13 +251,13 @@ def run_selection(
         "selection_spec": asdict(spec),
         "source_portfolio_result_sha256": actual_portfolio_sha,
         "source_families_result_sha256": actual_families_sha,
-        "study_fingerprint_sha256": study_fingerprint(context.spec),
+        "study_fingerprint_sha256": current_study_fp,
         "dataset_fingerprint_sha256": context.spec.dataset_fingerprint_sha256,
         "symbol": context.spec.symbol,
         "execution": asdict(context.spec.execution),
         "strategy_parameters_retuned": False,
         "priority_reoptimized": False,
-        "selection_algorithm": "one_pass_full_portfolio_leave_one_out_v1",
+        "selection_algorithm": SELECTION_ALGORITHM,
         "iterative_subset_search": False,
         "leverage_applied": False,
         "discovery_accessed": True,
@@ -252,6 +274,10 @@ def run_selection(
         "selected_portfolio_phase_aggregates": selected_aggregates,
         "selected_portfolio_windows": selected_windows,
     }
+    problems = verify_selection_result(payload)
+    if problems:
+        raise RuntimeError("generated selection result failed self-verification: " + "; ".join(problems))
+    return payload
 
 
 def verify_portfolio_result(payload: dict[str, Any]) -> list[str]:
@@ -320,15 +346,211 @@ def verify_portfolio_result(payload: dict[str, Any]) -> list[str]:
         problems.append("portfolio windows include an unauthorized phase")
     try:
         recomputed = _phase_aggregates(windows, slot_count=spec.slot_count)
+        combined = _aggregate_portfolio_windows(windows, slot_count=spec.slot_count)
     except (KeyError, TypeError, ValueError) as exc:
         problems.append(f"portfolio window aggregates are invalid: {exc}")
         return problems
     if payload.get("phase_aggregates") != recomputed:
         problems.append("phase_aggregates do not match stored windows")
-    combined = _aggregate_portfolio_windows(windows, slot_count=spec.slot_count)
     if payload.get("aggregate") != combined:
         problems.append("aggregate does not match stored windows")
     return problems
+
+
+def verify_selection_result(payload: dict[str, Any]) -> list[str]:
+    """Verify a stored selection result without rerunning market data.
+
+    The sealed-holdout stage can use this as a local integrity gate before it trusts the
+    selected set. Source file SHA checks still belong to the caller because they require
+    access to those source files.
+    """
+
+    problems: list[str] = []
+    if payload.get("schema_version") != 1:
+        problems.append("unsupported selection-result schema_version")
+    if payload.get("kind") != "parameter_extract.portfolio_selection":
+        problems.append("selection-result kind is invalid")
+    if payload.get("strategy_parameters_retuned") is not False:
+        problems.append("selection result does not prove frozen strategy parameters")
+    if payload.get("priority_reoptimized") is not False:
+        problems.append("selection result indicates priority reoptimization")
+    if payload.get("selection_algorithm") != SELECTION_ALGORITHM:
+        problems.append("selection algorithm is unsupported")
+    if payload.get("iterative_subset_search") is not False:
+        problems.append("selection result indicates iterative subset search")
+    if payload.get("leverage_applied") is not False:
+        problems.append("selection result unexpectedly applies leverage")
+    if payload.get("discovery_accessed") is not True:
+        problems.append("selection result does not indicate discovery access")
+    if payload.get("validation_accessed") is not True:
+        problems.append("selection result does not indicate validation access")
+    if payload.get("holdout_accessed") is not False:
+        problems.append("selection result indicates holdout access")
+
+    spec_payload = payload.get("selection_spec")
+    if not isinstance(spec_payload, dict):
+        problems.append("selection_spec is missing or invalid")
+    else:
+        try:
+            gates = SelectionGates(**spec_payload["gates"])
+            spec = SelectionSpec(
+                name=str(spec_payload["name"]),
+                source_portfolio_result_sha256=str(
+                    spec_payload["source_portfolio_result_sha256"]
+                ),
+                gates=gates,
+            )
+            if payload.get("selection_fingerprint_sha256") != selection_fingerprint(spec):
+                problems.append("selection fingerprint does not match selection_spec")
+            if payload.get("source_portfolio_result_sha256") != spec.source_portfolio_result_sha256:
+                problems.append("selection source portfolio-result SHA is inconsistent")
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"selection_spec is invalid: {exc}")
+
+    slot_count = payload.get("slot_count")
+    if not isinstance(slot_count, int) or slot_count < 1:
+        problems.append("selection slot_count is invalid")
+        return problems
+
+    selected = payload.get("selected")
+    marginal = payload.get("marginal_evidence")
+    if not isinstance(selected, list) or not selected:
+        problems.append("selected set is missing or empty")
+        return problems
+    if not isinstance(marginal, list):
+        problems.append("marginal_evidence is missing or invalid")
+        return problems
+    if payload.get("source_representative_count") != len(marginal):
+        problems.append("source_representative_count does not match marginal evidence")
+    if payload.get("selected_count") != len(selected):
+        problems.append("selected_count does not match selected set")
+    if payload.get("dropped_count") != len(marginal) - len(selected):
+        problems.append("dropped_count is inconsistent")
+
+    marginal_by_family: dict[str, dict[str, Any]] = {}
+    keep_ids: set[str] = set()
+    seen_marginal_fps: set[str] = set()
+    for index, row in enumerate(marginal):
+        try:
+            family_id = str(row["family_id"])
+            strategy = StrategySpec(**row["strategy"])
+            fingerprint = candidate_fingerprint(strategy)
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"marginal row {index}: invalid strategy row: {exc}")
+            continue
+        if family_id in marginal_by_family:
+            problems.append(f"marginal row {index}: duplicate family_id")
+        if fingerprint in seen_marginal_fps:
+            problems.append(f"marginal row {index}: duplicate strategy fingerprint")
+        if row.get("candidate_fingerprint_sha256") != fingerprint:
+            problems.append(f"marginal row {index}: strategy fingerprint mismatch")
+        status = row.get("status")
+        failures = row.get("failure_reasons")
+        if status == "KEEP":
+            keep_ids.add(family_id)
+            if failures not in ([], None):
+                problems.append(f"marginal row {index}: KEEP row has failure reasons")
+        elif status == "DROP":
+            if not isinstance(failures, list) or not failures:
+                problems.append(f"marginal row {index}: DROP row lacks failure reasons")
+        else:
+            problems.append(f"marginal row {index}: invalid status")
+        marginal_by_family[family_id] = row
+        seen_marginal_fps.add(fingerprint)
+
+    selected_ids: list[str] = []
+    selected_original_priorities: list[int] = []
+    seen_selected_fps: set[str] = set()
+    for index, row in enumerate(selected):
+        try:
+            family_id = str(row["family_id"])
+            strategy = StrategySpec(**row["strategy"])
+            fingerprint = candidate_fingerprint(strategy)
+            original_priority = int(row["original_priority"])
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"selected row {index}: invalid row: {exc}")
+            continue
+        if row.get("priority") != index + 1:
+            problems.append(f"selected row {index}: compact priority is inconsistent")
+        if original_priority < 1:
+            problems.append(f"selected row {index}: original priority is invalid")
+        if row.get("candidate_fingerprint_sha256") != fingerprint:
+            problems.append(f"selected row {index}: strategy fingerprint mismatch")
+        if fingerprint in seen_selected_fps:
+            problems.append(f"selected row {index}: duplicate strategy fingerprint")
+        marginal_row = marginal_by_family.get(family_id)
+        if marginal_row is None or marginal_row.get("status") != "KEEP":
+            problems.append(f"selected row {index}: family is not a KEEP marginal row")
+        elif (
+            marginal_row.get("candidate_fingerprint_sha256") != fingerprint
+            or marginal_row.get("strategy") != row.get("strategy")
+        ):
+            problems.append(f"selected row {index}: selected and marginal rows disagree")
+        selected_ids.append(family_id)
+        selected_original_priorities.append(original_priority)
+        seen_selected_fps.add(fingerprint)
+
+    if set(selected_ids) != keep_ids:
+        problems.append("selected families do not equal KEEP marginal families")
+    if selected_original_priorities != sorted(selected_original_priorities):
+        problems.append("selected set does not preserve original relative priority")
+
+    source_portfolio_sha = payload.get("source_portfolio_result_sha256")
+    if isinstance(source_portfolio_sha, str):
+        try:
+            expected_set_fp = _selection_set_fingerprint(
+                source_portfolio_sha=source_portfolio_sha,
+                slot_count=slot_count,
+                selected=selected,
+            )
+            if payload.get("selected_set_fingerprint_sha256") != expected_set_fp:
+                problems.append("selected-set fingerprint does not match selected rows")
+        except (TypeError, ValueError) as exc:
+            problems.append(f"selected-set fingerprint cannot be recomputed: {exc}")
+    else:
+        problems.append("selection source portfolio-result SHA is missing")
+
+    selected_windows = payload.get("selected_portfolio_windows")
+    if not isinstance(selected_windows, list):
+        problems.append("selected_portfolio_windows is missing or invalid")
+    else:
+        phases = {row.get("phase") for row in selected_windows if isinstance(row, dict)}
+        if phases - {"discovery", "validation"}:
+            problems.append("selected portfolio windows include an unauthorized phase")
+        try:
+            recomputed = _phase_aggregates(selected_windows, slot_count=slot_count)
+            if payload.get("selected_portfolio_phase_aggregates") != recomputed:
+                problems.append(
+                    "selected_portfolio_phase_aggregates do not match selected windows"
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"selected portfolio windows are invalid: {exc}")
+    return problems
+
+
+def _verify_portfolio_priorities_match_families(
+    portfolio_result: dict[str, Any],
+    representatives: dict[str, dict[str, Any]],
+    portfolio_spec: PortfolioSpec,
+) -> None:
+    if set(portfolio_spec.priority_family_ids) != set(representatives):
+        raise ValueError("portfolio priority families do not match frozen family representatives")
+    priorities = portfolio_result.get("priorities")
+    if not isinstance(priorities, list):
+        raise ValueError("portfolio result has no priority rows")
+    by_family = {row.get("family_id"): row for row in priorities if isinstance(row, dict)}
+    if set(by_family) != set(representatives):
+        raise ValueError("portfolio priority rows do not cover frozen family representatives")
+    for family_id, representative in representatives.items():
+        priority = by_family[family_id]
+        if (
+            priority.get("candidate_fingerprint_sha256")
+            != representative.get("candidate_fingerprint_sha256")
+            or priority.get("strategy") != representative.get("strategy")
+        ):
+            raise ValueError(
+                f"portfolio priority row {family_id} does not match its frozen family representative"
+            )
 
 
 def _portfolio_spec_from_result(payload: dict[str, Any]) -> PortfolioSpec:
@@ -499,6 +721,7 @@ def _selection_set_fingerprint(
     slot_count: int,
     selected: Sequence[dict[str, Any]],
 ) -> str:
+    _validate_digest(source_portfolio_sha)
     stable = {
         "schema_version": 1,
         "kind": "parameter_extract.selected_portfolio_set",
@@ -507,7 +730,7 @@ def _selection_set_fingerprint(
         "selected": list(selected),
     }
     canonical = json.dumps(
-        stable, sort_keys=True, separators=(",", ":")
+        stable, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
