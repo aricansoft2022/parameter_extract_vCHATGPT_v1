@@ -22,10 +22,12 @@ boundaries are trustworthy.
    parameter retuning; every candidate receives PASS/REJECT plus machine-readable reasons.
 7. **Neighborhood robustness** — PASS centers are diagnosed with non-promotable one-axis
    neighbors across discovery + validation; holdout remains untouched.
+8. **Strategy families** — ROBUST frozen centers are grouped by tolerant raw-signal overlap,
+   accepted-entry overlap, position-exposure overlap and normalized parameter distance using
+   conservative complete-link clustering.
 
 Still intentionally deferred:
 
-- candidate-family clustering and signal-overlap deduplication;
 - portfolio/slot replay and priority assignment;
 - sealed holdout promotion workflow;
 - ccbot `teams.csv` export;
@@ -37,6 +39,8 @@ Still intentionally deferred:
 - **Named data before results.** Every study is pinned to byte-level input identities.
 - **Discovery searches; validation rejects.** Validation never retunes a frozen center.
 - **Neighbors diagnose; they do not replace.** Robustness cannot promote a nearby variant.
+- **Families deduplicate; they do not invent.** A family representative is an existing
+  ROBUST frozen center, never a synthesized midpoint.
 - **Holdout stays sealed until the research decision is frozen.**
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
@@ -213,6 +217,24 @@ Only validation `PASS` centers are diagnosed. V1 perturbs one parameter axis at 
 Neighbors are explicitly `diagnostic_only` and `neighbor_strategies_promotable: false`;
 even a better-performing neighbor cannot replace the frozen center.
 
+## Strategy-family deduplication
+
+See [`docs/FAMILIES.md`](docs/FAMILIES.md).
+
+```bash
+pextract families \
+  --study study.json \
+  --robustness-result robustness-result.json \
+  --families families.json \
+  --data-directory . \
+  --output families-result.json
+```
+
+The family stage uses discovery + validation behavioral evidence only. V1 requires pairwise
+thresholds on raw signals, accepted entries, position exposure and normalized parameter
+distance, then applies complete-link grouping so weak similarity chains cannot collapse
+unrelated candidates. Every representative is an existing ROBUST center and remains frozen.
+
 ## Funding CSV
 
 ```text
@@ -225,7 +247,7 @@ explicit approximation.
 
 ## Next milestone
 
-Group robust centers into genuine strategy/signal families instead of treating nearby or
-highly synchronized candidates as independent teams. The next layer should quantify signal
-and trade overlap, choose representative frozen centers without retuning them, and prepare a
-small diverse set for portfolio/slot replay. Holdout remains sealed during that work.
+Replay the frozen family representatives together under the live bot's shared capital, slot
+occupancy and deterministic priority rules. Portfolio construction should measure marginal
+contribution and slot competition without retuning strategy parameters. Holdout remains sealed
+until that portfolio policy is frozen.

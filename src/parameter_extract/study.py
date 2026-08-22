@@ -10,8 +10,8 @@ from .io import load_binance_klines_csv, load_funding_csv, load_strategy_json
 from .manifest import verify_manifest
 from .metrics import summarize
 from .models import Candle, ExecutionModel, FundingEvent, StrategySpec
-from .replay import replay_signals
-from .signals import generate_signals
+from .replay import ReplayResult, replay_signals
+from .signals import Signal, generate_signals
 
 STUDY_SCHEMA_VERSION = 1
 Phase = Literal["discovery", "validation", "holdout"]
@@ -65,6 +65,12 @@ class StudyContext:
     spec: StudySpec
     candles: tuple[Candle, ...]
     funding: tuple[FundingEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowReplay:
+    signals: tuple[Signal, ...]
+    result: ReplayResult
 
 
 def load_study_json(path: str | Path) -> StudySpec:
@@ -146,22 +152,9 @@ def evaluate_strategy(
     reveal_holdout: bool = False,
 ) -> dict[str, Any]:
     spec = context.spec
-    if strategy.symbol != spec.symbol:
-        raise ValueError(
-            f"team symbol {strategy.symbol} does not match study symbol {spec.symbol}"
-        )
-    requested = tuple(phases)
-    unknown = set(requested) - {"discovery", "validation", "holdout"}
-    if unknown:
-        raise ValueError(f"unknown study phase(s): {', '.join(sorted(unknown))}")
-    if "holdout" in requested and not reveal_holdout:
-        raise ValueError("holdout evaluation requires reveal_holdout=True")
-
-    phase_windows: dict[Phase, tuple[WindowSpec, ...]] = {
-        "discovery": spec.discovery,
-        "validation": spec.validation,
-        "holdout": spec.holdout,
-    }
+    _validate_strategy_symbol(spec, strategy)
+    requested = _validate_phase_request(phases, reveal_holdout=reveal_holdout)
+    phase_windows = _phase_windows(spec)
     windows = [
         _run_window(
             phase,
@@ -189,6 +182,79 @@ def evaluate_strategy(
         "phases_evaluated": list(requested),
         "holdout_revealed": holdout_revealed,
         "withheld_holdout_windows": 0 if holdout_revealed else len(spec.holdout),
+        "windows": windows,
+    }
+
+
+def collect_strategy_evidence(
+    context: StudyContext,
+    strategy: StrategySpec,
+    *,
+    phases: Sequence[Phase] = ("discovery", "validation"),
+) -> dict[str, Any]:
+    """Collect behavioral timestamps for similarity analysis without touching holdout.
+
+    This API is deliberately narrower than ``evaluate_strategy``: holdout is not merely
+    hidden by default, it is forbidden. It exposes raw signal times, accepted-entry signal
+    times and position intervals while preserving the same flat-per-window semantics.
+    """
+    spec = context.spec
+    _validate_strategy_symbol(spec, strategy)
+    requested = tuple(phases)
+    if not requested:
+        raise ValueError("at least one evidence phase is required")
+    if len(requested) != len(set(requested)):
+        raise ValueError("evidence phases must be unique")
+    unknown = set(requested) - {"discovery", "validation"}
+    if unknown:
+        raise ValueError("behavioral evidence may use discovery and validation only")
+
+    phase_windows = _phase_windows(spec)
+    windows: list[dict[str, Any]] = []
+    for phase in requested:
+        for window in phase_windows[phase]:
+            replay = _replay_window(
+                window,
+                context.candles,
+                context.funding,
+                strategy,
+                spec.execution,
+                warmup_candles=spec.warmup_candles,
+            )
+            accepted_signal_times = [trade.signal_time_ms for trade in replay.result.trades]
+            position_intervals: list[list[int]] = [
+                [trade.entry_time_ms, max(trade.entry_time_ms + 1, trade.exit_time_ms)]
+                for trade in replay.result.trades
+            ]
+            if replay.result.open_position is not None:
+                accepted_signal_times.append(replay.result.open_position.signal_time_ms)
+                position_intervals.append(
+                    [
+                        replay.result.open_position.entry_time_ms,
+                        max(replay.result.open_position.entry_time_ms + 1, window.end_ms),
+                    ]
+                )
+            windows.append(
+                {
+                    "phase": phase,
+                    "name": window.name,
+                    "start_ms": window.start_ms,
+                    "end_ms": window.end_ms,
+                    "raw_signal_times_ms": [signal.timestamp_ms for signal in replay.signals],
+                    "accepted_signal_times_ms": sorted(accepted_signal_times),
+                    "position_intervals_ms": position_intervals,
+                }
+            )
+
+    return {
+        "schema_version": 1,
+        "kind": "parameter_extract.strategy_evidence",
+        "study_fingerprint_sha256": study_fingerprint(spec),
+        "dataset_fingerprint_sha256": spec.dataset_fingerprint_sha256,
+        "symbol": spec.symbol,
+        "strategy": asdict(strategy),
+        "phases_evaluated": list(requested),
+        "holdout_accessed": False,
         "windows": windows,
     }
 
@@ -226,6 +292,37 @@ def _run_window(
     warmup_candles: int,
     min_trades: int,
 ) -> dict[str, Any]:
+    replay = _replay_window(
+        window,
+        candles,
+        funding,
+        strategy,
+        execution,
+        warmup_candles=warmup_candles,
+    )
+    return {
+        "phase": phase,
+        "name": window.name,
+        "start_ms": window.start_ms,
+        "end_ms": window.end_ms,
+        "warmup_candles": warmup_candles,
+        "raw_signal_count": replay.result.raw_signal_count,
+        "accepted_signal_count": replay.result.accepted_signal_count,
+        "skipped_while_open": replay.result.skipped_while_open,
+        "cancelled_on_gap": replay.result.cancelled_on_gap,
+        "metrics": summarize(replay.result, min_trades=min_trades).as_dict(),
+    }
+
+
+def _replay_window(
+    window: WindowSpec,
+    candles: Sequence[Candle],
+    funding: Sequence[FundingEvent],
+    strategy: StrategySpec,
+    execution: ExecutionModel,
+    *,
+    warmup_candles: int,
+) -> _WindowReplay:
     start_index = next(
         (index for index, candle in enumerate(candles) if candle.open_time_ms >= window.start_ms),
         None,
@@ -252,11 +349,11 @@ def _run_window(
 
     local = candles[start_index - warmup_candles : end_index]
     raw_signals, points = generate_signals(local, strategy)
-    signals = [
+    signals = tuple(
         signal
         for signal in raw_signals
         if window.start_ms <= signal.timestamp_ms < window.end_ms
-    ]
+    )
     local_funding = [
         event
         for event in funding
@@ -275,18 +372,38 @@ def _run_window(
         dataset_start_ms=window.start_ms,
         dataset_end_ms=window.end_ms - 1,
     )
+    return _WindowReplay(signals=signals, result=normalized)
+
+
+def _phase_windows(spec: StudySpec) -> dict[Phase, tuple[WindowSpec, ...]]:
     return {
-        "phase": phase,
-        "name": window.name,
-        "start_ms": window.start_ms,
-        "end_ms": window.end_ms,
-        "warmup_candles": warmup_candles,
-        "raw_signal_count": normalized.raw_signal_count,
-        "accepted_signal_count": normalized.accepted_signal_count,
-        "skipped_while_open": normalized.skipped_while_open,
-        "cancelled_on_gap": normalized.cancelled_on_gap,
-        "metrics": summarize(normalized, min_trades=min_trades).as_dict(),
+        "discovery": spec.discovery,
+        "validation": spec.validation,
+        "holdout": spec.holdout,
     }
+
+
+def _validate_strategy_symbol(spec: StudySpec, strategy: StrategySpec) -> None:
+    if strategy.symbol != spec.symbol:
+        raise ValueError(
+            f"team symbol {strategy.symbol} does not match study symbol {spec.symbol}"
+        )
+
+
+def _validate_phase_request(
+    phases: Sequence[Phase], *, reveal_holdout: bool
+) -> tuple[Phase, ...]:
+    requested = tuple(phases)
+    if not requested:
+        raise ValueError("at least one study phase is required")
+    if len(requested) != len(set(requested)):
+        raise ValueError("study phases must be unique")
+    unknown = set(requested) - {"discovery", "validation", "holdout"}
+    if unknown:
+        raise ValueError(f"unknown study phase(s): {', '.join(sorted(unknown))}")
+    if "holdout" in requested and not reveal_holdout:
+        raise ValueError("holdout evaluation requires reveal_holdout=True")
+    return requested
 
 
 def _windows_from_payload(rows: list[dict[str, Any]]) -> tuple[WindowSpec, ...]:
