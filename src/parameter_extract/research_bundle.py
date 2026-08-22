@@ -12,6 +12,7 @@ from .scale_calibration import (
     load_scale_calibration_json,
     run_scale_calibration,
     scale_calibration_fingerprint,
+    scale_calibration_result_fingerprint,
     verify_scale_calibration_result,
 )
 from .search import load_search_json, search_fingerprint
@@ -238,6 +239,15 @@ def run_bundle_calibration(
         "bundle_fingerprint_sha256": verification["bundle_fingerprint_sha256"],
         "required_safe_max_candidates": verification["required_safe_max_candidates"],
     }
+    result["scale_calibration_result_fingerprint_sha256"] = (
+        scale_calibration_result_fingerprint(result)
+    )
+    problems = verify_scale_calibration_result(result)
+    if problems:
+        raise RuntimeError(
+            "bundle calibration result failed self-verification after lineage metadata: "
+            + "; ".join(problems)
+        )
     return result
 
 
