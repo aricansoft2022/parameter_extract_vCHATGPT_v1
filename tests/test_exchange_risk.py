@@ -257,10 +257,17 @@ def test_exchange_risk_result_detects_snapshot_or_scenario_mutation(tmp_path: Pa
     monkeypatch.setattr(exchange_module, "verify_risk_result", lambda payload: [])
     result = run_exchange_risk(risk_path, snapshot_path, contract_path)
 
+    # A semantically valid provenance change must be caught by the stored snapshot fingerprint.
+    mutated = json.loads(json.dumps(result))
+    mutated["snapshot"]["source"] += " altered"
+    problems = verify_exchange_risk_result(mutated)
+    assert any("snapshot fingerprint" in problem for problem in problems)
+
+    # A bracket mutation that breaks cum continuity is still detected, but at semantic validation.
     mutated = json.loads(json.dumps(result))
     mutated["snapshot"]["brackets"][0]["maint_margin_ratio"] = 0.006
     problems = verify_exchange_risk_result(mutated)
-    assert any("snapshot fingerprint" in problem for problem in problems)
+    assert any("spec/snapshot is invalid" in problem for problem in problems)
 
     mutated = json.loads(json.dumps(result))
     mutated["deployment_scenarios"][0]["liquidation_distance_pct"] = 99.0
