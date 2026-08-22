@@ -131,11 +131,11 @@ def _search_payload() -> dict:
         "min_adx_width": 4.0,
         "ranges": {
             "rsi_period": [14, 15],
-            "rsi_entry": {"start": 42.0, "stop": 46.0, "step": 4.0},
-            "adx_min": {"start": 0.0, "stop": 10.0, "step": 10.0},
-            "adx_max": {"start": 90.0, "stop": 100.0, "step": 10.0},
-            "tp_price_pct": {"start": 0.8, "stop": 1.2, "step": 0.4},
-            "rsi_exit": {"start": 62.0, "stop": 68.0, "step": 6.0},
+            "rsi_entry": {"start": 30.0, "stop": 60.0, "step": 15.0},
+            "adx_min": {"start": 0.0, "stop": 0.0, "step": 1.0},
+            "adx_max": {"start": 100.0, "stop": 100.0, "step": 1.0},
+            "tp_price_pct": {"start": 0.2, "stop": 0.4, "step": 0.2},
+            "rsi_exit": {"start": 55.0, "stop": 70.0, "step": 15.0},
         },
         "gates": {
             "min_total_trades": 1,
@@ -251,6 +251,7 @@ def test_crossing_index_full_search_matches_prepared_frontier(tmp_path: Path, mo
     assert actual["validation_accessed"] is False
     assert actual["holdout_accessed"] is False
     assert actual["frontier"]
+    assert actual["refined_candidates"] > 0
 
 
 def test_stratified_runtime_sample_covers_rsi_period_and_exit_mode_pairs():
