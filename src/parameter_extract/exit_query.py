@@ -129,6 +129,14 @@ class _FundingAtCandle:
     event: FundingEvent
 
 
+@dataclass(slots=True)
+class QueryReplayStats:
+    """Exact logical work performed by indexed funding range queries."""
+
+    funding_range_bisects: int = 0
+    funding_event_checks: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class ExitQueryWindow:
     indexed: IndexedWindow
@@ -136,6 +144,7 @@ class ExitQueryWindow:
     low_tree: _MinTree
     rsi_tree_by_period: dict[int, _MaxTree]
     funding: tuple[_FundingAtCandle, ...]
+    funding_candle_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,13 +164,17 @@ def build_exit_query_index(indexed: IndexedDiscovery) -> ExitQueryDiscovery:
             rsi_trees[period] = _MaxTree(
                 [(-inf if point is None else point.rsi) for point in points]
             )
+        indexed_funding = _index_funding(candles, window.prepared.funding)
         windows.append(
             ExitQueryWindow(
                 indexed=window,
                 high_tree=_MaxTree([candle.high for candle in candles]),
                 low_tree=_MinTree([candle.low for candle in candles]),
                 rsi_tree_by_period=rsi_trees,
-                funding=_index_funding(candles, window.prepared.funding),
+                funding=indexed_funding,
+                funding_candle_indices=tuple(
+                    item.candle_index for item in indexed_funding
+                ),
             )
         )
     return ExitQueryDiscovery(indexed=indexed, windows=tuple(windows))
@@ -173,6 +186,7 @@ def replay_signals_query(
     signals: Sequence[Signal],
     *,
     execution: ExecutionModel,
+    work_stats: QueryReplayStats | None = None,
 ) -> ReplayResult:
     """Exact jump replay using range/first-crossing queries instead of a candle loop.
 
@@ -260,6 +274,7 @@ def replay_signals_query(
             start_index=entry_index,
             end_index=range_end,
             exit_index=exit_index,
+            work_stats=work_stats,
         )
 
         if exit_index is None:
@@ -333,6 +348,8 @@ def evaluate_query_discovery(
     signal_cache: EntrySignalCache,
     query: ExitQueryDiscovery,
     strategy: StrategySpec,
+    *,
+    work_stats: QueryReplayStats | None = None,
 ) -> list[dict[str, object]]:
     indexed = signal_cache.indexed
     if query.indexed is not indexed:
@@ -355,6 +372,7 @@ def evaluate_query_discovery(
             strategy,
             signals,
             execution=context.spec.execution,
+            work_stats=work_stats,
         )
         normalized = replace(
             replay,
@@ -427,11 +445,22 @@ def _funding_return(
     start_index: int,
     end_index: int,
     exit_index: int | None,
+    work_stats: QueryReplayStats | None = None,
 ) -> float:
+    if start_index > end_index or not window.funding:
+        return 0.0
+
+    # Funding is indexed in chronological order, which is also non-decreasing candle order.
+    # Bisect away events that cannot belong to this position, then preserve the exact original
+    # event order and floating-point arithmetic for all remaining events.
+    left = bisect_left(window.funding_candle_indices, start_index)
+    right = bisect_right(window.funding_candle_indices, end_index)
+    if work_stats is not None:
+        work_stats.funding_range_bisects += 2
+        work_stats.funding_event_checks += right - left
+
     total = 0.0
-    for indexed in window.funding:
-        if indexed.candle_index < start_index or indexed.candle_index > end_index:
-            continue
+    for indexed in window.funding[left:right]:
         event = indexed.event
         if event.timestamp_ms <= entry_time_ms:
             continue
