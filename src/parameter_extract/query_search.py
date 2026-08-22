@@ -108,7 +108,7 @@ def run_query_search(
     cache_requests = cache.hits + cache.misses
     cache_hit_fraction = 0.0 if cache_requests == 0 else cache.hits / cache_requests
     reference_candle_visits_upper_bound = len(evaluated) * sum(
-        len(window.prepared.candles) for window in query.windows
+        len(window.indexed.prepared.candles) for window in query.windows
     )
     return {
         "schema_version": 1,
