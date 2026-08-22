@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from parameter_extract.bulk_search import run_bulk_search
 from parameter_extract.cached_search import run_cached_search
 from parameter_extract.query_search import run_query_search
 
@@ -34,18 +35,20 @@ def _run_timed(function, *args, **kwargs) -> tuple[dict[str, Any], float]:
     return result, time.perf_counter() - started
 
 
-def _assert_parity(reference: dict[str, Any], candidate: dict[str, Any]) -> None:
+def _assert_parity(reference: dict[str, Any], candidate: dict[str, Any], *, label: str) -> None:
     mismatches = [field for field in PARITY_FIELDS if reference.get(field) != candidate.get(field)]
     if mismatches:
         raise RuntimeError(
-            "benchmark aborted because cached/query research output differs: "
+            f"benchmark aborted because {label} research output differs: "
             + ", ".join(mismatches)
         )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Benchmark cached-search vs exact exit-query search after parity checks."
+        description=(
+            "Benchmark cached, exit-query and bulk-entry search after exact parity checks."
+        )
     )
     parser.add_argument("--study", required=True)
     parser.add_argument("--search", required=True)
@@ -56,21 +59,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    reference, cached_seconds = _run_timed(
+    cached, cached_seconds = _run_timed(
         run_cached_search,
         args.study,
         args.search,
         data_directory=args.data_directory,
     )
-    candidate, query_seconds = _run_timed(
+    query, query_seconds = _run_timed(
         run_query_search,
         args.study,
         args.search,
         data_directory=args.data_directory,
     )
-    _assert_parity(reference, candidate)
+    _assert_parity(cached, query, label="cached/query")
 
-    speed_ratio = None if query_seconds == 0.0 else cached_seconds / query_seconds
+    bulk, bulk_seconds = _run_timed(
+        run_bulk_search,
+        args.study,
+        args.search,
+        data_directory=args.data_directory,
+    )
+    _assert_parity(query, bulk, label="query/bulk")
+
     payload = {
         "schema_version": 1,
         "kind": "parameter_extract.search_engine_benchmark",
@@ -78,16 +88,30 @@ def main(argv: list[str] | None = None) -> int:
         "study": str(args.study),
         "search": str(args.search),
         "data_directory": str(args.data_directory),
-        "cached_engine": reference["search_engine"],
-        "query_engine": candidate["search_engine"],
-        "evaluated_candidates": candidate["evaluated_candidates"],
-        "pareto_candidates": candidate["pareto_candidates"],
+        "cached_engine": cached["search_engine"],
+        "query_engine": query["search_engine"],
+        "bulk_engine": bulk["search_engine"],
+        "evaluated_candidates": bulk["evaluated_candidates"],
+        "pareto_candidates": bulk["pareto_candidates"],
         "cached_seconds": cached_seconds,
         "query_seconds": query_seconds,
-        "cached_over_query_speed_ratio": speed_ratio,
+        "bulk_seconds": bulk_seconds,
+        "cached_over_query_speed_ratio": (
+            None if query_seconds == 0.0 else cached_seconds / query_seconds
+        ),
+        "query_over_bulk_speed_ratio": (
+            None if bulk_seconds == 0.0 else query_seconds / bulk_seconds
+        ),
+        "cached_over_bulk_speed_ratio": (
+            None if bulk_seconds == 0.0 else cached_seconds / bulk_seconds
+        ),
+        "bulk_event_scan_reduction_fraction": bulk[
+            "event_scan_reduction_fraction"
+        ],
         "note": (
-            "Wall-clock result for this machine/dataset/grid only. Correctness parity is "
-            "checked before timing is reported; this is not a universal speed guarantee."
+            "Wall-clock result for this machine/dataset/grid only. Exact research-output "
+            "parity is checked before timing is reported; ratios are not universal speed "
+            "guarantees."
         ),
     }
     text = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"

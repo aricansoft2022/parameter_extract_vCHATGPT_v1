@@ -20,6 +20,7 @@ pextract-fast-search = "parameter_extract.prepared_cli:main"
 pextract-indexed-search = "parameter_extract.indexed_cli:main"
 pextract-cached-search = "parameter_extract.cached_cli:main"
 pextract-query-search = "parameter_extract.query_cli:main"
+pextract-bulk-search = "parameter_extract.bulk_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
