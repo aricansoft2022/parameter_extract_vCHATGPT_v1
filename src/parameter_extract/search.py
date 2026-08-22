@@ -12,6 +12,12 @@ from .models import StrategySpec
 from .study import evaluate_strategy, load_study_context, study_fingerprint
 
 SEARCH_SCHEMA_VERSION = 1
+PARETO_OBJECTIVES = (
+    "worst_window_return_pct:max",
+    "median_window_return_pct:max",
+    "worst_mae_pct:max",
+    "max_drawdown_pct:max",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +81,14 @@ class SearchSpec:
             raise ValueError("search name cannot be empty")
         if not self.rsi_periods:
             raise ValueError("search requires at least one RSI period")
+        if len(set(self.rsi_periods)) != len(self.rsi_periods):
+            raise ValueError("rsi_period list contains duplicates")
         if any(period not in {14, 15, 16, 17, 18, 19} for period in self.rsi_periods):
             raise ValueError("RSI periods must be between 14 and 19")
         if not self.exit_modes or set(self.exit_modes) - {"tp", "rsi"}:
             raise ValueError("exit_modes may contain only tp and rsi")
+        if len(set(self.exit_modes)) != len(self.exit_modes):
+            raise ValueError("exit_modes contains duplicates")
         if "tp" in self.exit_modes and self.tp_price_pct is None:
             raise ValueError("TP search requires tp_price_pct range")
         if "rsi" in self.exit_modes and self.rsi_exit is None:
@@ -101,13 +111,17 @@ def load_search_json(path: str | Path) -> SearchSpec:
         adx_min=_range(ranges["adx_min"]),
         adx_max=_range(ranges["adx_max"]),
         exit_modes=tuple(str(value) for value in payload["exit_modes"]),
-        tp_price_pct=None if ranges.get("tp_price_pct") is None else _range(ranges["tp_price_pct"]),
+        tp_price_pct=(
+            None if ranges.get("tp_price_pct") is None else _range(ranges["tp_price_pct"])
+        ),
         rsi_exit=None if ranges.get("rsi_exit") is None else _range(ranges["rsi_exit"]),
         min_adx_width=float(payload.get("min_adx_width", 4.0)),
         gates=SearchGates(
             min_total_trades=int(gates["min_total_trades"]),
             min_positive_window_fraction=float(gates["min_positive_window_fraction"]),
-            min_worst_window_return_pct=_optional_float(gates.get("min_worst_window_return_pct")),
+            min_worst_window_return_pct=_optional_float(
+                gates.get("min_worst_window_return_pct")
+            ),
             min_worst_mae_pct=_optional_float(gates.get("min_worst_mae_pct")),
         ),
         refinement=RefinementSpec(
@@ -121,8 +135,9 @@ def load_search_json(path: str | Path) -> SearchSpec:
 
 
 def search_fingerprint(spec: SearchSpec) -> str:
-    payload = asdict(spec)
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    canonical = json.dumps(
+        asdict(spec), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
 
@@ -132,6 +147,11 @@ def run_search(
     *,
     data_directory: str | Path,
 ) -> dict[str, Any]:
+    """Run correctness-first coarse/refined search on discovery windows only.
+
+    This is intentionally not the future high-throughput factorized engine. Every candidate
+    still goes through the truth replay so the selection semantics can be trusted first.
+    """
     context = load_study_context(study_path, data_directory=data_directory)
     spec = load_search_json(search_path)
     coarse = list(_coarse_candidates(context.spec.symbol, spec))
@@ -144,7 +164,10 @@ def run_search(
     evaluated: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for strategy in coarse:
-        seen.add(_strategy_key(strategy))
+        key = _strategy_key(strategy)
+        if key in seen:
+            continue
+        seen.add(key)
         evaluated.append(_evaluate_candidate(context, strategy, stage="coarse"))
 
     gated = [row for row in evaluated if _passes_gates(row["aggregate"], spec.gates)]
@@ -176,13 +199,20 @@ def run_search(
         "kind": "parameter_extract.discovery_search",
         "search": spec.name,
         "search_fingerprint_sha256": search_fingerprint(spec),
+        "search_spec": asdict(spec),
         "study": context.spec.name,
         "study_fingerprint_sha256": study_fingerprint(context.spec),
         "dataset_fingerprint_sha256": context.spec.dataset_fingerprint_sha256,
+        "execution": asdict(context.spec.execution),
         "symbol": context.spec.symbol,
         "phase_used": "discovery",
         "validation_accessed": False,
         "holdout_accessed": False,
+        "pareto_objectives": list(PARETO_OBJECTIVES),
+        "frontier_order_note": (
+            "Frontier rows are ordered only to choose refinement/reporting order; "
+            "the order is not a scalar fitness ranking."
+        ),
         "coarse_candidates": len(coarse),
         "refined_candidates": refined_count,
         "evaluated_candidates": len(evaluated),
@@ -220,7 +250,11 @@ def _evaluate_candidate(context: Any, strategy: StrategySpec, *, stage: str) -> 
 
 def _aggregate(windows: list[dict[str, Any]]) -> dict[str, Any]:
     returns = [float(row["return_pct"]) for row in windows]
-    maes = [float(row["worst_mae_pct"]) for row in windows if row["worst_mae_pct"] is not None]
+    maes = [
+        float(row["worst_mae_pct"])
+        for row in windows
+        if row["worst_mae_pct"] is not None
+    ]
     drawdowns = [float(row["drawdown_pct"]) for row in windows]
     holding = [
         float(row["max_holding_minutes"])
@@ -232,7 +266,9 @@ def _aggregate(windows: list[dict[str, Any]]) -> dict[str, Any]:
         equity *= 1.0 + value / 100.0
     return {
         "window_count": len(windows),
-        "positive_window_fraction": 0.0 if not windows else sum(value > 0.0 for value in returns) / len(windows),
+        "positive_window_fraction": (
+            0.0 if not windows else sum(value > 0.0 for value in returns) / len(windows)
+        ),
         "total_trades": sum(int(row["trade_count"]) for row in windows),
         "compounded_window_return_pct": (equity - 1.0) * 100.0,
         "median_window_return_pct": statistics.median(returns) if returns else 0.0,
@@ -293,6 +329,7 @@ def _objective_values(metrics: dict[str, Any]) -> tuple[float, float, float, flo
 
 
 def _seed_priority(row: dict[str, Any]) -> tuple[float, float, float, float, int]:
+    """Deterministic refinement order, deliberately not a claimed fitness score."""
     metrics = row["aggregate"]
     return (
         float(metrics["worst_window_return_pct"]),
