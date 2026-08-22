@@ -11,6 +11,7 @@ from .metrics import summarize
 from .models import ExecutionModel
 from .parity import check_parity_fixture
 from .replay import run_strategy
+from .search import run_search
 from .study import run_study
 
 
@@ -47,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     study.add_argument("--data-directory", required=True)
     study.add_argument("--reveal-holdout", action="store_true")
     study.add_argument("--output")
+
+    search = sub.add_parser("search", help="coarse-to-fine parameter search on discovery windows only")
+    search.add_argument("--study", dest="study_file", required=True)
+    search.add_argument("--search", dest="search_file", required=True)
+    search.add_argument("--data-directory", required=True)
+    search.add_argument("--output", required=True)
     return parser
 
 
@@ -62,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         return _parity(args)
     if args.command == "study":
         return _study(args)
+    if args.command == "search":
+        return _search(args)
     return 2
 
 
@@ -138,6 +147,25 @@ def _study(args: argparse.Namespace) -> int:
     if args.output:
         write_json(args.output, payload)
     print(json.dumps(payload, indent=2, allow_nan=True))
+    return 0
+
+
+def _search(args: argparse.Namespace) -> int:
+    payload = run_search(
+        args.study_file,
+        args.search_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    summary = {
+        "output": args.output,
+        "search_fingerprint_sha256": payload["search_fingerprint_sha256"],
+        "phase_used": payload["phase_used"],
+        "evaluated_candidates": payload["evaluated_candidates"],
+        "passed_gates": payload["passed_gates"],
+        "pareto_candidates": payload["pareto_candidates"],
+    }
+    print(json.dumps(summary, indent=2))
     return 0
 
 
