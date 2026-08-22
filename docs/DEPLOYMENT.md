@@ -7,16 +7,22 @@ manifest beside it.
 
 ## Preconditions
 
-The exporter requires both:
+The exporter requires the complete final artifact chain:
 
 - the exact `selection-result.json` whose selected-set fingerprint was carried through
   holdout and risk evaluation;
+- the exact `risk-result.json` produced from that selection lineage;
 - an `exchange-risk-result.json` with `status: EXCHANGE_RISK_PASS`,
   `exchange_liquidation_validated: true` and `teams_export_ready: true`.
 
-Both input files are pinned by SHA-256 in `deployment.json`. A mismatch stops export.
-The selected-set fingerprint, symbol and slot count must also agree between the two
-artifacts.
+`deployment.json` pins the selection and exchange-risk files by SHA-256. The exporter also
+requires the supplied risk-result file to match the exact SHA stored inside exchange-risk,
+and the risk result must in turn pin the supplied selection-result SHA. This closes the
+selection -> risk -> exchange-risk artifact lineage instead of merely checking that the
+strategy parameters happen to be equal.
+
+The selected-set fingerprint, symbol and slot count must remain consistent through the
+chain.
 
 ## Audited live-bot contract
 
@@ -67,6 +73,7 @@ should not silently become an authorization to open new positions. If an operato
 ```bash
 pextract-deploy \
   --selection-result selection-result.json \
+  --risk-result risk-result.json \
   --exchange-risk-result exchange-risk-result.json \
   --deployment deployment.json \
   --teams-csv teams.csv \
@@ -82,7 +89,8 @@ risk and exchange-risk gates. For TP teams `rsi_exit` is blank; for RSI-exit tea
 
 `deployment-manifest.json` stores enough information to audit the serialization step:
 
-- exact source selection and exchange-risk SHA-256 values;
+- exact source selection, risk and exchange-risk SHA-256 values;
+- source holdout, study and dataset lineage inherited from the verified risk result;
 - selected-set and source-portfolio fingerprint lineage;
 - exchange snapshot fingerprint;
 - exact audited ccbot repository and commit;
@@ -95,6 +103,7 @@ risk and exchange-risk gates. For TP teams `rsi_exit` is blank; for RSI-exit tea
 It also records:
 
 ```text
+complete_artifact_lineage_checked: true
 strategy_parameters_retuned: false
 selected_set_changed: false
 priority_reoptimized: false
