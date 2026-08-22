@@ -4,8 +4,8 @@
 It binds byte-level dataset identity, the study contract, the intended discovery grid and the
 machine-specific scale calibration ladder into one immutable lineage.
 
-The bundle exists to prevent a common research failure: calibrating one grid or dataset and
-then silently running a different, larger discovery search.
+The bundle exists to prevent a common research failure: calibrating one grid, dataset or
+machine and then silently running a different discovery search elsewhere.
 
 ## Directory model
 
@@ -62,13 +62,18 @@ Build the inputs in this order so every downstream contract can pin the upstream
    sealed-holdout windows.
 3. Compute/pin the study fingerprint.
 4. Create the intended `discovery-search.json` and compute its search fingerprint.
-5. Create one or more calibration search contracts with increasing `max_candidates` budgets.
-6. Create `scale-calibration.json`, pinning the exact study/dataset plus every stage search
+5. Create optional smaller calibration search contracts with increasing `max_candidates`
+   budgets for earlier ladder stages.
+6. Include the **exact `discovery-search.json` contract itself** as a calibration stage at its
+   declared `refinement.max_candidates` budget.
+7. Create `scale-calibration.json`, pinning the exact study/dataset plus every stage search
    fingerprint.
-7. Create `bundle.json`, pinning all four identities above.
+8. Create `bundle.json`, pinning all four identities above.
 
-The calibration ladder must reach at least the intended discovery search
-`refinement.max_candidates`; otherwise bundle verification fails before any research run.
+The calibration ladder must reach the intended discovery budget, and at least one stage must
+have both the exact discovery-search fingerprint and that exact candidate budget. A different
+grid with the same candidate count is not accepted as proof that the intended discovery grid
+has the same cost.
 
 ## Step 1: static verification
 
@@ -87,6 +92,7 @@ This performs no candidate evaluation. It verifies:
 - discovery-search fingerprint;
 - scale-calibration fingerprint;
 - every calibration-stage search fingerprint and candidate budget;
+- presence of an exact-discovery calibration stage;
 - path containment inside the bundle directory.
 
 The verification result explicitly reports `discovery_accessed: false`,
@@ -105,9 +111,17 @@ The existing fail-closed scale ladder runs with `bulk_entry_membership_exact_v1`
 must satisfy its predeclared minimum exercised-candidate count, wall-clock ceiling and Python
 heap ceiling while keeping all runtime parity gates green.
 
+The exact discovery grid is therefore executed once during calibration as a resource/parity
+proof. Its full frontier is not retained by the scale artifact, so the later discovery command
+runs it again to produce the canonical discovery-search result.
+
 The result records only the last passing stage as `safe_max_candidates`. The bundle command
 adds bundle lineage metadata and recomputes the scale-result fingerprint, so the stored result
 still passes `pextract-scale verify`.
+
+Calibration also records the Python/platform/CPU environment. That machine metadata is part
+of the discovery gate. Copying a successful calibration result to a different runtime or
+machine does not authorize discovery there; recalibrate on that environment.
 
 A calibration FAIL is not permission to loosen the limit after seeing it and call the same
 artifact calibrated. Change the calibration contract intentionally and create a new lineage.
@@ -126,7 +140,9 @@ Discovery is blocked before engine invocation unless:
 
 - the calibration result self-verifies;
 - it belongs to the exact calibration/study/dataset lineage in the bundle;
-- `safe_max_candidates` is at least the bundled discovery search budget.
+- its machine metadata exactly matches the current Python/platform/CPU environment;
+- `safe_max_candidates` is at least the bundled discovery search budget;
+- the exact discovery-search calibration stage itself has PASSed.
 
 The run must then use `bulk_entry_membership_exact_v1`, pass runtime parity, remain discovery
 only and reproduce the exact bundled study/dataset/search fingerprints.
@@ -142,13 +158,16 @@ pextract freeze-candidates \
 
 The discovery result also contains a `research_bundle` lineage block with the bundle
 fingerprint, calibration-result file SHA-256, calibration-result semantic fingerprint,
-calibrated safe cap and required search cap.
+calibrated machine, calibrated safe cap, exact discovery-calibration stage names and required
+search cap.
 
 ## What this does not do
 
 The bundle layer does **not**:
 
 - invent a safe 50k/100k/1M cap without real data and the target machine;
+- assume equal candidate counts imply equal runtime across different grids;
+- reuse a calibration from a different machine/runtime;
 - alter search ranges or candidate caps;
 - use validation or holdout during calibration/discovery;
 - automatically continue to validation, robustness, portfolio selection or holdout;
