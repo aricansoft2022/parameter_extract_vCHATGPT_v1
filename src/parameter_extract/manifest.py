@@ -90,6 +90,20 @@ def audit_candles(candles: Iterable[Candle]) -> CandleAudit:
     )
 
 
+def manifest_fingerprint(manifest: dict[str, object]) -> str:
+    stable = {
+        "schema_version": manifest.get("schema_version"),
+        "kind": manifest.get("kind"),
+        "source": manifest.get("source"),
+        "files": manifest.get("files"),
+        "candles": manifest.get("candles"),
+    }
+    fingerprint_payload = json.dumps(
+        stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(fingerprint_payload).hexdigest()
+
+
 def build_manifest(
     *,
     candle_path: str | Path,
@@ -107,29 +121,31 @@ def build_manifest(
         files["funding"] = asdict(
             identify_file(funding_path, expected_sha256=funding_expected_sha256)
         )
-    audit = asdict(audit_candles(candles))
-    stable = {
+    manifest: dict[str, object] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "kind": "parameter_extract.data_manifest",
         "source": source,
         "files": files,
-        "candles": audit,
+        "candles": asdict(audit_candles(candles)),
     }
-    fingerprint_payload = json.dumps(
-        stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return {
-        **stable,
-        "dataset_fingerprint_sha256": hashlib.sha256(fingerprint_payload).hexdigest(),
-    }
+    manifest["dataset_fingerprint_sha256"] = manifest_fingerprint(manifest)
+    return manifest
 
 
 def verify_manifest(manifest: dict[str, object], *, directory: str | Path) -> list[str]:
     root = Path(directory)
     problems: list[str] = []
+    stored_fingerprint = manifest.get("dataset_fingerprint_sha256")
+    computed_fingerprint = manifest_fingerprint(manifest)
+    if stored_fingerprint != computed_fingerprint:
+        problems.append(
+            "manifest fingerprint mismatch: "
+            f"expected {stored_fingerprint}, computed {computed_fingerprint}"
+        )
     files = manifest.get("files")
     if not isinstance(files, dict):
-        return ["manifest files section is missing or invalid"]
+        problems.append("manifest files section is missing or invalid")
+        return problems
     for label in ("candles", "funding"):
         record = files.get(label)
         if record is None:
