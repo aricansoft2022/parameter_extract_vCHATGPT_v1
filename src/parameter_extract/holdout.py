@@ -11,8 +11,8 @@ from .manifest import sha256_file
 from .models import StrategySpec
 from .portfolio import _Candidate, _aggregate_portfolio_windows, _run_portfolio_window
 from .promotion import candidate_fingerprint
-from .selection import verify_selection_result
-from .study import StudyContext, load_study_context, study_fingerprint
+from .selection import _selection_set_fingerprint, verify_selection_result
+from .study import load_study_context, study_fingerprint
 
 HOLDOUT_SCHEMA_VERSION = 1
 HOLDOUT_POLICY = "predeclared_sealed_holdout_gates_v1"
@@ -148,7 +148,24 @@ def run_holdout(
     if selection_result.get("execution") != asdict(context.spec.execution):
         raise ValueError("selection-result execution assumptions do not match the study")
 
-    candidates = _candidates_from_selection(selection_result)
+    source_portfolio_sha = selection_result.get("source_portfolio_result_sha256")
+    if not isinstance(source_portfolio_sha, str):
+        raise ValueError("selection result lacks source portfolio-result SHA")
+    _validate_digest(source_portfolio_sha)
+
+    selected_snapshot = [
+        {
+            "priority": int(row["priority"]),
+            "original_priority": int(row["original_priority"]),
+            "family_id": str(row["family_id"]),
+            "candidate_fingerprint_sha256": str(
+                row["candidate_fingerprint_sha256"]
+            ),
+            "strategy": row["strategy"],
+        }
+        for row in selection_result["selected"]
+    ]
+    candidates = _candidates_from_selected(selected_snapshot)
     slot_count = int(selection_result["slot_count"])
     windows = [
         _run_portfolio_window(
@@ -172,7 +189,10 @@ def run_holdout(
         "holdout_fingerprint_sha256": holdout_fingerprint(spec),
         "holdout_spec": asdict(spec),
         "source_selection_result_sha256": actual_selection_sha,
-        "source_selected_set_fingerprint_sha256": spec.source_selected_set_fingerprint_sha256,
+        "source_portfolio_result_sha256": source_portfolio_sha,
+        "source_selected_set_fingerprint_sha256": (
+            spec.source_selected_set_fingerprint_sha256
+        ),
         "study_fingerprint_sha256": current_study_fp,
         "dataset_fingerprint_sha256": context.spec.dataset_fingerprint_sha256,
         "symbol": context.spec.symbol,
@@ -189,15 +209,7 @@ def run_holdout(
         "holdout_accessed": True,
         "slot_count": slot_count,
         "selected_count": len(candidates),
-        "selected": [
-            {
-                "priority": row.priority,
-                "family_id": row.family_id,
-                "candidate_fingerprint_sha256": row.fingerprint,
-                "strategy": asdict(row.strategy),
-            }
-            for row in candidates
-        ],
+        "selected": selected_snapshot,
         "status": status,
         "failure_reasons": failures,
         "evaluation": evaluation,
@@ -273,6 +285,15 @@ def verify_holdout_result(payload: dict[str, Any]) -> list[str]:
         problems.append("holdout slot_count is invalid")
         return problems
 
+    source_portfolio_sha = payload.get("source_portfolio_result_sha256")
+    if not isinstance(source_portfolio_sha, str):
+        problems.append("source_portfolio_result_sha256 is missing")
+    else:
+        try:
+            _validate_digest(source_portfolio_sha)
+        except ValueError as exc:
+            problems.append(f"source_portfolio_result_sha256 is invalid: {exc}")
+
     selected = payload.get("selected")
     if not isinstance(selected, list) or not selected:
         problems.append("holdout selected set is missing or empty")
@@ -280,26 +301,54 @@ def verify_holdout_result(payload: dict[str, Any]) -> list[str]:
     if payload.get("selected_count") != len(selected):
         problems.append("selected_count does not match selected rows")
     seen_fps: set[str] = set()
+    seen_family_ids: set[str] = set()
+    original_priorities: list[int] = []
     for index, row in enumerate(selected):
         try:
+            family_id = str(row["family_id"])
             strategy = StrategySpec(**row["strategy"])
             fingerprint = candidate_fingerprint(strategy)
+            original_priority = int(row["original_priority"])
         except (KeyError, TypeError, ValueError) as exc:
-            problems.append(f"selected row {index}: invalid strategy: {exc}")
+            problems.append(f"selected row {index}: invalid row: {exc}")
             continue
         if row.get("priority") != index + 1:
             problems.append(f"selected row {index}: priority is inconsistent")
+        if original_priority < 1:
+            problems.append(f"selected row {index}: original priority is invalid")
         if row.get("candidate_fingerprint_sha256") != fingerprint:
             problems.append(f"selected row {index}: strategy fingerprint mismatch")
         if fingerprint in seen_fps:
             problems.append(f"selected row {index}: duplicate strategy fingerprint")
+        if family_id in seen_family_ids:
+            problems.append(f"selected row {index}: duplicate family_id")
         seen_fps.add(fingerprint)
+        seen_family_ids.add(family_id)
+        original_priorities.append(original_priority)
+    if original_priorities != sorted(original_priorities):
+        problems.append("holdout selected set does not preserve original relative priority")
+
+    selected_set_fp = payload.get("source_selected_set_fingerprint_sha256")
+    if isinstance(source_portfolio_sha, str) and isinstance(selected_set_fp, str):
+        try:
+            expected_set_fp = _selection_set_fingerprint(
+                source_portfolio_sha=source_portfolio_sha,
+                slot_count=slot_count,
+                selected=selected,
+            )
+            if selected_set_fp != expected_set_fp:
+                problems.append("selected-set fingerprint does not match holdout selected rows")
+        except (TypeError, ValueError) as exc:
+            problems.append(f"selected-set fingerprint cannot be recomputed: {exc}")
 
     windows = payload.get("windows")
     if not isinstance(windows, list) or not windows:
         problems.append("holdout windows are missing or empty")
         return problems
-    if any(row.get("phase") != "holdout" for row in windows if isinstance(row, dict)):
+    if not all(isinstance(row, dict) for row in windows):
+        problems.append("holdout windows contain an invalid row")
+        return problems
+    if any(row.get("phase") != "holdout" for row in windows):
         problems.append("holdout result contains a non-holdout window")
     try:
         recomputed_aggregate = _aggregate_portfolio_windows(
@@ -325,9 +374,9 @@ def verify_holdout_result(payload: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _candidates_from_selection(selection_result: dict[str, Any]) -> tuple[_Candidate, ...]:
+def _candidates_from_selected(selected: Sequence[dict[str, Any]]) -> tuple[_Candidate, ...]:
     candidates: list[_Candidate] = []
-    for index, row in enumerate(selection_result["selected"]):
+    for index, row in enumerate(selected):
         if row.get("priority") != index + 1:
             raise ValueError("selection result compact priority is inconsistent")
         strategy = StrategySpec(**row["strategy"])
