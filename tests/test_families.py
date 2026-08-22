@@ -97,8 +97,8 @@ def _robustness_result() -> dict:
     )
     centers = [
         _robust_center(_strategy(30.0, 30.0, 1.0), strength=0.95),
-        _robust_center(_strategy(30.5, 31.0, 1.0), strength=0.85),
-        _robust_center(_strategy(40.0, 50.0, 2.0), strength=0.90),
+        _robust_center(_strategy(30.8, 30.0, 1.0), strength=0.90),
+        _robust_center(_strategy(31.6, 30.0, 1.0), strength=0.85),
     ]
     return {
         "schema_version": 1,
@@ -165,7 +165,7 @@ def _family_contract(tmp_path: Path, robustness_path: Path) -> Path:
             "min_raw_signal_dice": 0.8,
             "min_accepted_signal_dice": 0.8,
             "min_exposure_jaccard": 0.8,
-            "max_parameter_distance": 1.0,
+            "max_parameter_distance": 0.5,
         },
         "parameter_scales": {
             "rsi_period": 1.0,
@@ -193,7 +193,7 @@ def _context():
     )
 
 
-def test_family_clustering_uses_behavior_and_keeps_existing_representative(
+def test_complete_link_blocks_similarity_bridge_and_keeps_existing_representative(
     tmp_path: Path, monkeypatch
 ):
     robustness_path = tmp_path / "robustness-result.json"
@@ -201,30 +201,25 @@ def test_family_clustering_uses_behavior_and_keeps_existing_representative(
     family_path = _family_contract(tmp_path, robustness_path)
 
     def fake_evidence(_context, strategy, *, phases):
-        if strategy.rsi_entry < 35.0:
-            offset = 0 if strategy.rsi_entry == 30.0 else 5_000
-            windows = [
+        offsets = {30.0: 0, 30.8: 5_000, 31.6: 10_000}
+        offset = offsets[strategy.rsi_entry]
+        return {
+            "phases_evaluated": ["discovery", "validation"],
+            "holdout_accessed": False,
+            "windows": [
                 {
-                    "raw_signal_times_ms": [60_000 + offset, 180_000 + offset, 300_000 + offset],
+                    "raw_signal_times_ms": [
+                        60_000 + offset,
+                        180_000 + offset,
+                        300_000 + offset,
+                    ],
                     "accepted_signal_times_ms": [60_000 + offset, 300_000 + offset],
                     "position_intervals_ms": [
                         [60_000 + offset, 120_000 + offset],
                         [300_000 + offset, 360_000 + offset],
                     ],
                 }
-            ]
-        else:
-            windows = [
-                {
-                    "raw_signal_times_ms": [1_000_000, 1_300_000],
-                    "accepted_signal_times_ms": [1_000_000],
-                    "position_intervals_ms": [[1_000_000, 1_200_000]],
-                }
-            ]
-        return {
-            "phases_evaluated": ["discovery", "validation"],
-            "holdout_accessed": False,
-            "windows": windows,
+            ],
         }
 
     monkeypatch.setattr(families_module, "load_study_context", lambda *a, **k: _context())
@@ -251,10 +246,18 @@ def test_family_clustering_uses_behavior_and_keeps_existing_representative(
     assert first_family["representative_strategy"] == _strategy(30.0, 30.0, 1.0)
     assert all(row["parameters_retuned"] is False for row in result["representatives"])
 
-    matching_pair = next(row for row in result["pairwise"] if row["same_family"])
-    assert matching_pair["raw_signal_dice"] == pytest.approx(1.0)
-    assert matching_pair["accepted_signal_dice"] == pytest.approx(1.0)
-    assert matching_pair["exposure_jaccard"] > 0.8
+    fp_a = candidate_fingerprint(_strategy(30.0, 30.0, 1.0))
+    fp_b = candidate_fingerprint(_strategy(30.8, 30.0, 1.0))
+    fp_c = candidate_fingerprint(_strategy(31.6, 30.0, 1.0))
+    pairs = {frozenset((row["left"], row["right"])): row for row in result["pairwise"]}
+    assert pairs[frozenset((fp_a, fp_b))]["same_family"] is True
+    assert pairs[frozenset((fp_b, fp_c))]["same_family"] is True
+    assert pairs[frozenset((fp_a, fp_c))]["same_family"] is False
+    assert first_family["member_count"] == 2
+    assert {member["candidate_fingerprint_sha256"] for member in first_family["members"]} == {
+        fp_a,
+        fp_b,
+    }
 
 
 def test_similarity_primitives_are_bounded_and_interpretable():
