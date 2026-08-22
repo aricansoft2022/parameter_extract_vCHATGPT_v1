@@ -10,7 +10,12 @@ from parameter_extract.manifest import sha256_file
 from parameter_extract.models import ExecutionModel, StrategySpec
 from parameter_extract.portfolio import _Candidate
 from parameter_extract.promotion import candidate_fingerprint
-from parameter_extract.selection import _marginal_evidence, run_selection
+from parameter_extract.selection import (
+    SelectionGates,
+    _marginal_evidence,
+    run_selection,
+    verify_selection_result,
+)
 
 
 def _strategy(entry: float) -> dict:
@@ -74,22 +79,34 @@ def _aggregates_for(tag: str) -> dict[str, dict]:
     raise AssertionError(tag)
 
 
-def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Path, monkeypatch):
+def _source_files(tmp_path: Path):
     strategy_a = _strategy(30.0)
     strategy_b = _strategy(31.0)
     fp_a = candidate_fingerprint(strategy_a)
     fp_b = candidate_fingerprint(strategy_b)
+    execution = ExecutionModel.expected_live()
     families = {
+        "study_fingerprint_sha256": "b" * 64,
+        "dataset_fingerprint_sha256": "a" * 64,
+        "symbol": "BTCUSDT",
+        "execution": asdict(execution),
         "representatives": [
-            {"family_id": "F0001", "candidate_fingerprint_sha256": fp_a, "strategy": strategy_a},
-            {"family_id": "F0002", "candidate_fingerprint_sha256": fp_b, "strategy": strategy_b},
-        ]
+            {
+                "family_id": "F0001",
+                "candidate_fingerprint_sha256": fp_a,
+                "strategy": strategy_a,
+            },
+            {
+                "family_id": "F0002",
+                "candidate_fingerprint_sha256": fp_b,
+                "strategy": strategy_b,
+            },
+        ],
     }
     families_path = tmp_path / "families-result.json"
     families_path.write_text(json.dumps(families), encoding="utf-8")
     family_sha = sha256_file(families_path)
 
-    execution = ExecutionModel.expected_live()
     full_windows = _full_windows()
     full_aggregates = _aggregates_for("full")
     portfolio = {
@@ -104,6 +121,20 @@ def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Pa
             "slot_count": 1,
             "priority_family_ids": ["F0001", "F0002"],
         },
+        "priorities": [
+            {
+                "priority": 1,
+                "family_id": "F0001",
+                "candidate_fingerprint_sha256": fp_a,
+                "strategy": strategy_a,
+            },
+            {
+                "priority": 2,
+                "family_id": "F0002",
+                "candidate_fingerprint_sha256": fp_b,
+                "strategy": strategy_b,
+            },
+        ],
         "windows": full_windows,
         "phase_aggregates": full_aggregates,
     }
@@ -128,7 +159,6 @@ def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Pa
         ),
         encoding="utf-8",
     )
-
     context = SimpleNamespace(
         spec=SimpleNamespace(
             name="study",
@@ -137,18 +167,21 @@ def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Pa
             execution=execution,
         )
     )
+    return families_path, portfolio_path, selection_path, context
+
+
+def _install_fake_replay(monkeypatch, context):
     monkeypatch.setattr(selection_module, "load_study_context", lambda *a, **k: context)
     monkeypatch.setattr(selection_module, "study_fingerprint", lambda _spec: "b" * 64)
     monkeypatch.setattr(selection_module, "verify_families_result", lambda payload: [])
     monkeypatch.setattr(selection_module, "verify_portfolio_result", lambda payload: [])
-
     calls: list[tuple[str, ...]] = []
 
     def fake_replay(_context, candidates, *, slot_count):
         ids = tuple(row.family_id for row in candidates)
         calls.append(ids)
         if ids == ("F0001", "F0002"):
-            return full_windows
+            return _full_windows()
         if ids == ("F0002",):
             return [{"tag": "without_a", "phase": "discovery"}]
         if ids == ("F0001",):
@@ -160,6 +193,12 @@ def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Pa
 
     monkeypatch.setattr(selection_module, "_replay_candidate_set", fake_replay)
     monkeypatch.setattr(selection_module, "_phase_aggregates", fake_phase_aggregates)
+    return calls
+
+
+def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Path, monkeypatch):
+    families_path, portfolio_path, selection_path, context = _source_files(tmp_path)
+    calls = _install_fake_replay(monkeypatch, context)
 
     result = run_selection(
         "study.json",
@@ -179,6 +218,8 @@ def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Pa
     assert result["priority_reoptimized"] is False
     assert result["iterative_subset_search"] is False
     assert result["holdout_accessed"] is False
+    assert verify_selection_result(result) == []
+    json.dumps(result, allow_nan=False)
     # One full replay, one leave-one-out per candidate, one final selected-set replay.
     assert calls == [
         ("F0001", "F0002"),
@@ -186,6 +227,53 @@ def test_selection_is_one_pass_leave_one_out_and_preserves_priority(tmp_path: Pa
         ("F0001",),
         ("F0001",),
     ]
+
+
+def test_selection_rejects_portfolio_strategy_that_differs_from_frozen_family(
+    tmp_path: Path, monkeypatch
+):
+    families_path, portfolio_path, selection_path, context = _source_files(tmp_path)
+    _install_fake_replay(monkeypatch, context)
+    portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+    portfolio["priorities"][0]["strategy"] = _strategy(32.0)
+    portfolio["priorities"][0]["candidate_fingerprint_sha256"] = candidate_fingerprint(
+        portfolio["priorities"][0]["strategy"]
+    )
+    portfolio_path.write_text(json.dumps(portfolio), encoding="utf-8")
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    selection["source_portfolio_result_sha256"] = sha256_file(portfolio_path)
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match its frozen family representative"):
+        run_selection(
+            "study.json",
+            families_path,
+            portfolio_path,
+            selection_path,
+            data_directory=tmp_path,
+        )
+
+
+def test_selection_result_mutation_breaks_selected_set_fingerprint(tmp_path: Path, monkeypatch):
+    families_path, portfolio_path, selection_path, context = _source_files(tmp_path)
+    _install_fake_replay(monkeypatch, context)
+    result = run_selection(
+        "study.json",
+        families_path,
+        portfolio_path,
+        selection_path,
+        data_directory=tmp_path,
+    )
+    result["selected"][0]["strategy"]["rsi_entry"] = 30.25
+    problems = verify_selection_result(result)
+    assert any("fingerprint" in problem or "disagree" in problem for problem in problems)
+
+
+def test_selection_gates_reject_nonfinite_values():
+    with pytest.raises(ValueError, match="must be finite"):
+        SelectionGates(float("nan"), 0.0, 1)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        SelectionGates(0.0, 0.0, 1, max_validation_drawdown_worsening_pct=float("inf"))
 
 
 def test_contention_metric_excludes_candidates_own_blocked_signals():
