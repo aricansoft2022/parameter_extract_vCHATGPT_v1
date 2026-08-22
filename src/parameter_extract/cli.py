@@ -11,6 +11,7 @@ from .metrics import summarize
 from .models import ExecutionModel
 from .parity import check_parity_fixture
 from .replay import run_strategy
+from .study import run_study
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     parity = sub.add_parser("parity", help="compare extractor results with a frozen live-bot fixture")
     parity.add_argument("--fixture", required=True)
+
+    study = sub.add_parser("study", help="evaluate one candidate over named research windows")
+    study.add_argument("--study", dest="study_file", required=True)
+    study.add_argument("--team", required=True)
+    study.add_argument("--data-directory", required=True)
+    study.add_argument("--reveal-holdout", action="store_true")
+    study.add_argument("--output")
     return parser
 
 
@@ -52,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         return _verify_manifest(args)
     if args.command == "parity":
         return _parity(args)
+    if args.command == "study":
+        return _study(args)
     return 2
 
 
@@ -116,6 +126,19 @@ def _parity(args: argparse.Namespace) -> int:
     report = check_parity_fixture(args.fixture)
     print(json.dumps(asdict(report), indent=2))
     return 0 if report.ok else 1
+
+
+def _study(args: argparse.Namespace) -> int:
+    payload = run_study(
+        args.study_file,
+        args.team,
+        data_directory=args.data_directory,
+        reveal_holdout=args.reveal_holdout,
+    )
+    if args.output:
+        write_json(args.output, payload)
+    print(json.dumps(payload, indent=2, allow_nan=True))
+    return 0
 
 
 if __name__ == "__main__":
