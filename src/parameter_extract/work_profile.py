@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
-from .exit_query import ExitQueryWindow
+from .exit_query import ExitQueryWindow, QueryReplayStats
 
 
 @dataclass(slots=True)
@@ -15,6 +15,7 @@ class QueryWorkProfile:
     open_positions: int = 0
     exit_lookup_requests: int = 0
     excursion_range_requests: int = 0
+    funding_range_bisects: int = 0
     funding_event_checks: int = 0
     closed_trade_signal_bisects: int = 0
 
@@ -22,12 +23,14 @@ class QueryWorkProfile:
         self,
         compact_windows: Sequence[dict[str, Any]],
         query_windows: Sequence[ExitQueryWindow],
+        *,
+        replay_stats: QueryReplayStats,
     ) -> None:
         if len(compact_windows) != len(query_windows):
             raise ValueError("work-profile windows do not match exit-query windows")
         self.candidate_evaluations += 1
         self.candidate_window_replays += len(compact_windows)
-        for row, window in zip(compact_windows, query_windows, strict=True):
+        for row in compact_windows:
             closed = int(row["trade_count"])
             is_open = bool(row["open_at_end"])
             accepted = closed + int(is_open)
@@ -36,11 +39,13 @@ class QueryWorkProfile:
             self.open_positions += int(is_open)
             self.exit_lookup_requests += accepted
             self.excursion_range_requests += accepted
-            # `_funding_return` currently iterates the complete indexed funding tuple once
-            # for every accepted position, then applies range/timestamp/mode filters.
-            self.funding_event_checks += accepted * len(window.funding)
             # One bisect locates the next reusable raw signal after every closed trade.
             self.closed_trade_signal_bisects += closed
+        # Funding telemetry is now measured by the replay itself. It counts only events in
+        # the indexed candle range selected by the two bisects, not the old full-window
+        # scan upper bound.
+        self.funding_range_bisects += replay_stats.funding_range_bisects
+        self.funding_event_checks += replay_stats.funding_event_checks
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
