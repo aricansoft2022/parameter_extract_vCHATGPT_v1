@@ -9,7 +9,9 @@ from typing import Any, Sequence
 
 from .holdout import verify_holdout_result
 from .manifest import sha256_file
-from .selection import verify_selection_result
+from .models import StrategySpec
+from .promotion import candidate_fingerprint
+from .selection import _selection_set_fingerprint, verify_selection_result
 
 RISK_SCHEMA_VERSION = 1
 RISK_METHOD = "conservative_mae_budget_v1"
@@ -137,10 +139,28 @@ def run_risk(
             f"allocation_pct implies {implied_slots} live slots but research used {slot_count}"
         )
 
+    source_portfolio_sha = holdout.get("source_portfolio_result_sha256")
+    if not isinstance(source_portfolio_sha, str):
+        raise ValueError("holdout result lacks source portfolio-result SHA")
+    _validate_digest(source_portfolio_sha)
+
+    selected_snapshot = [
+        {
+            "priority": int(row["priority"]),
+            "original_priority": int(row["original_priority"]),
+            "family_id": str(row["family_id"]),
+            "candidate_fingerprint_sha256": str(
+                row["candidate_fingerprint_sha256"]
+            ),
+            "strategy": row["strategy"],
+        }
+        for row in holdout["selected"]
+    ]
+
     evidence = _collect_trade_evidence(selection, holdout)
     summary = _summarize_evidence(
         evidence,
-        selected=holdout["selected"],
+        selected=selected_snapshot,
         spec=spec,
     )
     failures = _risk_failures(summary, spec)
@@ -154,6 +174,7 @@ def run_risk(
         "risk_spec": asdict(spec),
         "source_holdout_result_sha256": actual_holdout_sha,
         "source_selection_result_sha256": actual_selection_sha,
+        "source_portfolio_result_sha256": source_portfolio_sha,
         "source_selected_set_fingerprint_sha256": holdout[
             "source_selected_set_fingerprint_sha256"
         ],
@@ -172,6 +193,8 @@ def run_risk(
         "slot_count": slot_count,
         "allocation_pct": spec.allocation_pct,
         "reserve_pct": spec.reserve_pct,
+        "selected_count": len(selected_snapshot),
+        "selected": selected_snapshot,
         "status": status,
         "failure_reasons": failures,
         "summary": summary,
@@ -222,23 +245,73 @@ def verify_risk_result(payload: dict[str, Any]) -> list[str]:
         except (TypeError, ValueError) as exc:
             problems.append(f"risk_spec is invalid: {exc}")
 
+    slot_count = payload.get("slot_count")
+    if not isinstance(slot_count, int) or slot_count < 1:
+        problems.append("risk slot_count is invalid")
+        return problems
+
+    source_portfolio_sha = payload.get("source_portfolio_result_sha256")
+    if not isinstance(source_portfolio_sha, str):
+        problems.append("risk source portfolio-result SHA is missing")
+    else:
+        try:
+            _validate_digest(source_portfolio_sha)
+        except ValueError as exc:
+            problems.append(f"risk source portfolio-result SHA is invalid: {exc}")
+
+    selected = payload.get("selected")
+    if not isinstance(selected, list) or not selected:
+        problems.append("risk selected set is missing or empty")
+        return problems
+    if payload.get("selected_count") != len(selected):
+        problems.append("risk selected_count does not match selected rows")
+    seen_fps: set[str] = set()
+    seen_family_ids: set[str] = set()
+    original_priorities: list[int] = []
+    for index, row in enumerate(selected):
+        try:
+            family_id = str(row["family_id"])
+            strategy = StrategySpec(**row["strategy"])
+            fingerprint = candidate_fingerprint(strategy)
+            original_priority = int(row["original_priority"])
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"risk selected row {index}: invalid row: {exc}")
+            continue
+        if row.get("priority") != index + 1:
+            problems.append(f"risk selected row {index}: priority is inconsistent")
+        if original_priority < 1:
+            problems.append(f"risk selected row {index}: original priority is invalid")
+        if row.get("candidate_fingerprint_sha256") != fingerprint:
+            problems.append(f"risk selected row {index}: strategy fingerprint mismatch")
+        if fingerprint in seen_fps:
+            problems.append(f"risk selected row {index}: duplicate strategy fingerprint")
+        if family_id in seen_family_ids:
+            problems.append(f"risk selected row {index}: duplicate family_id")
+        seen_fps.add(fingerprint)
+        seen_family_ids.add(family_id)
+        original_priorities.append(original_priority)
+    if original_priorities != sorted(original_priorities):
+        problems.append("risk selected set does not preserve original relative priority")
+
+    selected_set_fp = payload.get("source_selected_set_fingerprint_sha256")
+    if isinstance(source_portfolio_sha, str) and isinstance(selected_set_fp, str):
+        try:
+            expected_set_fp = _selection_set_fingerprint(
+                source_portfolio_sha=source_portfolio_sha,
+                slot_count=slot_count,
+                selected=selected,
+            )
+            if selected_set_fp != expected_set_fp:
+                problems.append("risk selected-set fingerprint does not match selected rows")
+        except (TypeError, ValueError) as exc:
+            problems.append(f"risk selected-set fingerprint cannot be recomputed: {exc}")
+
     evidence = payload.get("trade_evidence")
     if not isinstance(evidence, list):
         problems.append("trade_evidence is missing or invalid")
         return problems
-    selected_snapshot = payload.get("summary", {}).get("families")
-    if not isinstance(selected_snapshot, list):
-        problems.append("risk family summary is missing or invalid")
-        return problems
     try:
-        selected_stub = [
-            {
-                "family_id": row["family_id"],
-                "candidate_fingerprint_sha256": row["candidate_fingerprint_sha256"],
-            }
-            for row in selected_snapshot
-        ]
-        recomputed = _summarize_evidence(evidence, selected=selected_stub, spec=spec)
+        recomputed = _summarize_evidence(evidence, selected=selected, spec=spec)
     except (KeyError, TypeError, ValueError) as exc:
         problems.append(f"risk evidence cannot be summarized: {exc}")
         return problems
