@@ -23,6 +23,7 @@ pextract-query-search = "parameter_extract.query_cli:main"
 pextract-bulk-search = "parameter_extract.bulk_cli:main"
 pextract-scale = "parameter_extract.scale_cli:main"
 pextract-bundle = "parameter_extract.bundle_cli:main"
+pextract-freeze-diverse = "parameter_extract.diverse_freeze:main"
 pextract-migrate-paramderive = "parameter_extract.legacy_data_cli_compat:main"
 
 [tool.setuptools.packages.find]
