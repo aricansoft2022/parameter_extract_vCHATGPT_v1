@@ -14,13 +14,13 @@ live elsewhere and are supplied through `--data-directory`.
 
 ```text
 btc-run-2026/
-  bundle.json
   data-manifest.json
   study.json
   discovery-search.json
   scale-calibration.json
   calibration-10k.json
   calibration-50k.json
+  bundle.json              # created last by pextract-bundle seal
 
 /data/binance/BTCUSDT/
   BTCUSDT-1m-history.csv
@@ -28,10 +28,12 @@ btc-run-2026/
 ```
 
 All contract paths stored inside `bundle.json`, `study.json` and `scale-calibration.json` must
-resolve inside the bundle directory. `../` escapes and absolute paths are rejected. The data
-files themselves are located through the manifest and `--data-directory`, then re-hashed.
+resolve inside the bundle directory. `../` escapes and absolute stored paths are rejected. The
+data files themselves are located through the manifest and `--data-directory`, then re-hashed.
 
 ## Bundle contract
+
+The final `bundle.json` looks like this:
 
 ```json
 {
@@ -48,9 +50,9 @@ files themselves are located through the manifest and `--data-directory`, then r
 }
 ```
 
-The fingerprints are semantic contract fingerprints, not merely filenames. Changing a search
-step, window, execution assumption, dataset manifest or calibration limit requires a new
-fingerprint and therefore a new bundle lineage.
+Do not hand-copy those bundle-level fingerprints. `pextract-bundle seal` computes them from
+the authored contracts and refuses to create the final file unless the complete lineage
+verifies.
 
 ## Construction order
 
@@ -60,15 +62,47 @@ Build the inputs in this order so every downstream contract can pin the upstream
    `dataset_fingerprint_sha256`.
 2. Create `study.json` with that dataset fingerprint and the final discovery, validation and
    sealed-holdout windows.
-3. Compute/pin the study fingerprint.
-4. Create the intended `discovery-search.json` and compute its search fingerprint.
-5. Create optional smaller calibration search contracts with increasing `max_candidates`
+3. Create the intended `discovery-search.json`.
+4. Create optional smaller calibration search contracts with increasing `max_candidates`
    budgets for earlier ladder stages.
-6. Include the **exact `discovery-search.json` contract itself** as a calibration stage at its
+5. Include the **exact `discovery-search.json` contract itself** as a calibration stage at its
    declared `refinement.max_candidates` budget.
-7. Create `scale-calibration.json`, pinning the exact study/dataset plus every stage search
+6. Create `scale-calibration.json`, pinning the exact study/dataset plus every stage search
    fingerprint.
-8. Create `bundle.json`, pinning all four identities above.
+7. Seal the final bundle from those files.
+
+The study/calibration contracts still need the upstream semantic fingerprints they explicitly
+pin, but `bundle.json` itself is generated rather than manually assembled.
+
+## Step 0: seal the bundle
+
+Run the sealer with contract paths that are inside the output bundle directory. Relative paths
+are interpreted relative to the output directory; absolute input paths are allowed only when
+they still resolve inside that directory.
+
+```bash
+pextract-bundle seal \
+  --name "BTCUSDT representative run 2026-08" \
+  --manifest btc-run-2026/data-manifest.json \
+  --study btc-run-2026/study.json \
+  --search btc-run-2026/discovery-search.json \
+  --calibration btc-run-2026/scale-calibration.json \
+  --data-directory /data/binance/BTCUSDT \
+  --output btc-run-2026/bundle.json
+```
+
+The sealer:
+
+- computes manifest/study/search/calibration fingerprints from the actual files;
+- writes a temporary strict-JSON bundle;
+- runs the full static `verify_research_bundle()` gate against the real data bytes;
+- atomically renames the temporary file to `bundle.json` only after verification succeeds;
+- refuses to overwrite an existing `bundle.json`;
+- removes the temporary file if verification fails;
+- never edits or copies the upstream contract files.
+
+If a lineage input changes intentionally, create a new bundle output rather than silently
+replacing the old sealed bundle.
 
 The calibration ladder must reach the intended discovery budget, and at least one stage must
 have both the exact discovery-search fingerprint and that exact candidate budget. A different
@@ -172,6 +206,7 @@ The bundle layer does **not**:
 - use validation or holdout during calibration/discovery;
 - automatically continue to validation, robustness, portfolio selection or holdout;
 - convert a failed calibration into a smaller hidden search;
+- overwrite an existing sealed bundle;
 - mutate the live trading bot.
 
 After a successful bundled discovery, the existing freeze -> validation -> robustness ->
