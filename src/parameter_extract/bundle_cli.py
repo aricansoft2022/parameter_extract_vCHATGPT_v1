@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .bundle_builder import seal_research_bundle
 from .research_bundle import (
     run_bundle_calibration,
     run_bundle_discovery,
@@ -15,10 +16,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pextract-bundle",
         description=(
-            "Verify and execute a pinned real-data research bundle through calibration-gated discovery."
+            "Seal, verify and execute a pinned real-data research bundle through "
+            "calibration-gated discovery."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    seal = subparsers.add_parser(
+        "seal",
+        help="Compute contract fingerprints and atomically create a verified bundle.json.",
+    )
+    seal.add_argument("--name", required=True)
+    seal.add_argument("--manifest", required=True)
+    seal.add_argument("--study", required=True)
+    seal.add_argument("--search", required=True)
+    seal.add_argument("--calibration", required=True)
+    seal.add_argument("--data-directory", required=True)
+    seal.add_argument("--output", required=True)
 
     verify = subparsers.add_parser(
         "verify",
@@ -48,6 +62,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "seal":
+        result = seal_research_bundle(
+            name=args.name,
+            manifest_file=args.manifest,
+            study_file=args.study,
+            discovery_search_file=args.search,
+            calibration_file=args.calibration,
+            output_file=args.output,
+            data_directory=args.data_directory,
+        )
+        verification = result["verification"]
+        _print(
+            {
+                "output": result["output"],
+                "bundle": verification["bundle"],
+                "bundle_fingerprint_sha256": verification[
+                    "bundle_fingerprint_sha256"
+                ],
+                "required_safe_max_candidates": verification[
+                    "required_safe_max_candidates"
+                ],
+                "exact_discovery_calibration_stages": verification[
+                    "exact_discovery_calibration_stages"
+                ],
+                "ready_for_calibration": verification["ready_for_calibration"],
+            }
+        )
+        return 0
+
     if args.command == "verify":
         result = verify_research_bundle(args.bundle, data_directory=args.data_directory)
         _print(result)
