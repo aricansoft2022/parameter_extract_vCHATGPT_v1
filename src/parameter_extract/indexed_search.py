@@ -113,6 +113,19 @@ def run_indexed_search(
 
     frontier = sorted(frontier, key=_seed_priority, reverse=True)
     event_counts = indexed_event_counts(indexed)
+    full_checks_per_candidate = sum(
+        max(0, len(window.prepared.candles) - 1) for window in indexed.windows
+    )
+    full_signal_filter_checks = full_checks_per_candidate * len(evaluated)
+    indexed_signal_filter_checks = sum(
+        event_counts[StrategySpec(**row["strategy"]).rsi_period]
+        for row in evaluated
+    )
+    signal_filter_reduction_pct = (
+        0.0
+        if full_signal_filter_checks == 0
+        else (1.0 - indexed_signal_filter_checks / full_signal_filter_checks) * 100.0
+    )
     return {
         "schema_version": 1,
         "kind": "parameter_extract.discovery_search",
@@ -135,6 +148,13 @@ def run_indexed_search(
         "indexed_event_counts_by_rsi_period": {
             str(period): count for period, count in sorted(event_counts.items())
         },
+        "signal_filter_full_candle_checks_reference": full_signal_filter_checks,
+        "signal_filter_indexed_event_checks": indexed_signal_filter_checks,
+        "signal_filter_check_reduction_pct": signal_filter_reduction_pct,
+        "signal_filter_telemetry_note": (
+            "This measures only raw entry-signal filtering work. replay_signals still "
+            "walks each candidate's full candle timeline, so this is not total runtime speedup."
+        ),
         "prepared_discovery_window_count": len(indexed.windows),
         "pareto_objectives": list(PARETO_OBJECTIVES),
         "frontier_order_note": (
