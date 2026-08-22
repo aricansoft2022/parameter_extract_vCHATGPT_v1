@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Sequence
 
-from .bulk_entry import EMPTY_BULK_STATS, BulkPrimeStats, bulk_prime_entry_signals
+from .bulk_entry import BulkPrimeStats, bulk_prime_entry_signals
 from .cached_search import _runtime_cache_parity_check
 from .crossing_index import build_crossing_index
 from .entry_signal_cache import EntrySignalCache
@@ -29,7 +29,8 @@ from .search import (
     load_search_json,
     search_fingerprint,
 )
-from .study import StudyContext, load_study_context, study_fingerprint
+from .study import load_study_context, study_fingerprint
+from .work_profile import QueryWorkProfile
 
 BULK_SEARCH_ENGINE = "bulk_entry_membership_exact_v1"
 
@@ -62,6 +63,7 @@ def run_bulk_search(
 
     cache = EntrySignalCache.create(indexed)
     bulk_stats = bulk_prime_entry_signals(cache, coarse)
+    work_profile = QueryWorkProfile()
     evaluated: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for strategy in coarse:
@@ -69,7 +71,16 @@ def run_bulk_search(
         if key in seen:
             continue
         seen.add(key)
-        evaluated.append(_evaluate_query_candidate(context, cache, query, strategy, stage="coarse"))
+        evaluated.append(
+            _evaluate_query_candidate(
+                context,
+                cache,
+                query,
+                strategy,
+                stage="coarse",
+                work_profile=work_profile,
+            )
+        )
 
     gated = [row for row in evaluated if _passes_gates(row["aggregate"], spec.gates)]
     frontier = _pareto_frontier(gated)
@@ -104,6 +115,7 @@ def run_bulk_search(
                         query,
                         refined,
                         stage="refined",
+                        work_profile=work_profile,
                     )
                 )
                 refined_count += 1
@@ -151,10 +163,10 @@ def run_bulk_search(
         "bulk_entry_band_membership_checks": bulk_stats.band_membership_checks,
         "keywise_event_scan_upper_bound": bulk_stats.keywise_event_scan_upper_bound,
         "event_scan_reduction_fraction": scan_reduction_fraction,
+        "query_work_profile": work_profile.as_dict(),
         "bulk_telemetry_note": (
-            "Event-scan reduction compares one inverted event pass per RSI period against "
-            "scanning every crossing event separately for every unique entry key. It is a "
-            "work counter, not a wall-clock speed claim."
+            "Event-scan reduction and query-work fields are deterministic logical work "
+            "counters, not wall-clock speed claims."
         ),
         "pareto_objectives": list(PARETO_OBJECTIVES),
         "frontier_order_note": (
