@@ -24,7 +24,7 @@ The project is intentionally built as a chain of research gates rather than a pr
 15. **Exact accelerated discovery** — prepared indicators, crossing-event indexing, entry-signal membership caching, exact exit/range queries and bulk entry-membership inversion remove repeated work while runtime parity remains chained back to truth replay.
 16. **Deterministic work profiling** — query/entry work counters are machine-independent and wall-clock benchmarking remains separate, so the next optimization is chosen from measured work rather than intuition.
 17. **Fail-closed scale calibration** — increasing candidate budgets are exercised on the target dataset/machine under explicit time/heap limits; `safe_max_candidates` is only the last passing stage and is never auto-applied.
-18. **Calibrated research bundle** — manifest, study, exact discovery search and scale-calibration contracts are pinned together; discovery is blocked unless the exact intended grid has passed calibration on the same machine/runtime.
+18. **Calibrated research bundle** — manifest, study, exact discovery search and scale-calibration contracts are pinned together; discovery is blocked unless the exact intended grid has passed calibration on the same machine/runtime. The final `bundle.json` can be deterministically sealed from those authored contracts rather than hand-assembling bundle-level fingerprints.
 
 No universal large-grid cap is claimed. A 50k/100k/1M budget is considered safe only after the exact bundled discovery grid passes its explicit calibration contract on the machine that will run it.
 
@@ -46,6 +46,7 @@ No universal large-grid cap is claimed. A 50k/100k/1M budget is considered safe 
 - **Scale is calibrated, not assumed.** Candidate-count budgets are only accepted after explicit resource/parity stages on real data.
 - **The exact discovery grid must be calibrated.** A different grid with the same candidate count is not treated as equivalent work.
 - **Calibration is machine-specific.** A safe-cap artifact from a different Python/platform/CPU environment cannot authorize discovery.
+- **Bundles are sealed, not hand-patched.** Bundle-level fingerprints are computed from authored contracts and the final bundle is published only after static lineage/data verification.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
 - **Open-at-end is censored data.** The engine never fabricates an exit at a calendar or study-window boundary.
@@ -179,9 +180,18 @@ pextract search \
 
 See [`docs/RESEARCH_BUNDLE.md`](docs/RESEARCH_BUNDLE.md), [`docs/WORK_PROFILE.md`](docs/WORK_PROFILE.md) and [`docs/SCALE_CALIBRATION.md`](docs/SCALE_CALIBRATION.md).
 
-A real run should use one pinned bundle instead of launching a large grid directly:
+A real run should seal one pinned bundle before calibration instead of launching a large grid directly:
 
 ```bash
+pextract-bundle seal \
+  --name "BTCUSDT representative run 2026-08" \
+  --manifest btc-run-2026/data-manifest.json \
+  --study btc-run-2026/study.json \
+  --search btc-run-2026/discovery-search.json \
+  --calibration btc-run-2026/scale-calibration.json \
+  --data-directory /data/binance/BTCUSDT \
+  --output btc-run-2026/bundle.json
+
 pextract-bundle verify \
   --bundle btc-run-2026/bundle.json \
   --data-directory /data/binance/BTCUSDT
@@ -198,7 +208,7 @@ pextract-bundle discovery \
   --output btc-run-2026/discovery-search.json
 ```
 
-Static verification touches no research phase. Calibration is discovery-only and must include the exact intended discovery-search contract as one stage. Canonical discovery is then blocked unless that stage passed, `safe_max_candidates` covers the search budget, and the calibration machine metadata matches the current runtime.
+`seal` computes the bundle-level fingerprints from the actual contracts, refuses overwrite, verifies the static lineage against the real data bytes and only then atomically publishes `bundle.json`. Static verification touches no research phase. Calibration is discovery-only and must include the exact intended discovery-search contract as one stage. Canonical discovery is then blocked unless that stage passed, `safe_max_candidates` covers the search budget, and the calibration machine metadata matches the current runtime.
 
 ## Freeze and validate without retuning
 
@@ -385,4 +395,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-The engine and provenance chain are now ready to be exercised on a representative real-data bundle. The next milestone is not another speculative optimization: assemble the exact candle/funding manifest plus study/search/calibration contracts, run `pextract-bundle calibrate` on the target machine, then produce the canonical bundled discovery artifact. Only measured real-data work profiles and calibration results should determine whether another acceleration layer or a larger candidate budget is justified.
+The engine and provenance chain are now ready to be exercised on a representative real-data bundle. The next milestone is not another speculative optimization: assemble the exact candle/funding manifest plus study/search/calibration contracts, seal the bundle, run `pextract-bundle calibrate` on the target machine, then produce the canonical bundled discovery artifact. Only measured real-data work profiles and calibration results should determine whether another acceleration layer or a larger candidate budget is justified.
