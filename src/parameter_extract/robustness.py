@@ -3,12 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import statistics
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from .manifest import sha256_file
 from .models import StrategySpec
+from .promotion import (
+    ValidationGates,
+    ValidationSpec,
+    candidate_fingerprint,
+    validation_fingerprint,
+)
 from .study import evaluate_strategy, load_study_context, study_fingerprint
 
 ROBUSTNESS_SCHEMA_VERSION = 1
@@ -33,13 +39,18 @@ class NeighborhoodSteps:
 class RobustnessGates:
     min_neighbor_count: int
     min_validation_pass_fraction: float
-    min_discovery_positive_fraction: float
+    min_discovery_stable_neighbor_fraction: float
+    min_neighbor_discovery_positive_window_fraction: float = 0.5
     max_center_validation_advantage_pct: float | None = None
 
     def __post_init__(self) -> None:
         if self.min_neighbor_count < 1:
             raise ValueError("min_neighbor_count must be positive")
-        for name in ("min_validation_pass_fraction", "min_discovery_positive_fraction"):
+        for name in (
+            "min_validation_pass_fraction",
+            "min_discovery_stable_neighbor_fraction",
+            "min_neighbor_discovery_positive_window_fraction",
+        ):
             value = float(getattr(self, name))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be inside [0, 1]")
@@ -88,7 +99,12 @@ def load_robustness_json(path: str | Path) -> RobustnessSpec:
         gates=RobustnessGates(
             min_neighbor_count=int(gates["min_neighbor_count"]),
             min_validation_pass_fraction=float(gates["min_validation_pass_fraction"]),
-            min_discovery_positive_fraction=float(gates["min_discovery_positive_fraction"]),
+            min_discovery_stable_neighbor_fraction=float(
+                gates["min_discovery_stable_neighbor_fraction"]
+            ),
+            min_neighbor_discovery_positive_window_fraction=float(
+                gates.get("min_neighbor_discovery_positive_window_fraction", 0.5)
+            ),
             max_center_validation_advantage_pct=_optional_float(
                 gates.get("max_center_validation_advantage_pct")
             ),
@@ -118,12 +134,12 @@ def run_robustness(
     actual_validation_sha = sha256_file(validation_path)
     if spec.source_validation_result_sha256 != actual_validation_sha:
         raise ValueError("robustness contract is pinned to a different validation-result file")
-    if validation_result.get("kind") != "parameter_extract.validation_result":
-        raise ValueError("input is not a validation result")
-    if validation_result.get("parameters_retuned") is not False:
-        raise ValueError("validation result does not prove parameters stayed frozen")
-    if validation_result.get("holdout_accessed") is not False:
-        raise ValueError("validation result indicates holdout access")
+
+    validation_problems = verify_validation_result(validation_result)
+    if validation_problems:
+        raise ValueError(
+            "validation-result verification failed: " + "; ".join(validation_problems)
+        )
     if validation_result.get("study_fingerprint_sha256") != study_fingerprint(context.spec):
         raise ValueError("validation result belongs to a different study contract")
     if validation_result.get("dataset_fingerprint_sha256") != context.spec.dataset_fingerprint_sha256:
@@ -135,13 +151,16 @@ def run_robustness(
 
     centers = [
         row
-        for row in validation_result.get("candidates", [])
-        if row.get("promotion_status") == "PASS"
+        for row in validation_result["candidates"]
+        if row["promotion_status"] == "PASS"
     ]
     if not centers:
         raise ValueError("validation result contains no PASS candidates to diagnose")
 
-    planned = sum(len(_axis_neighbors(StrategySpec(**row["strategy"]), spec.steps)) for row in centers)
+    planned = sum(
+        len(_axis_neighbors(StrategySpec(**row["strategy"]), spec.steps))
+        for row in centers
+    )
     if planned > spec.max_neighbor_evaluations:
         raise ValueError(
             f"robustness requires {planned} neighbor evaluations, above max_neighbor_evaluations="
@@ -153,14 +172,16 @@ def run_robustness(
     robust_count = 0
     for center in centers:
         strategy = StrategySpec(**center["strategy"])
-        neighbor_rows = []
+        neighbor_rows: list[dict[str, Any]] = []
         for axis, direction, neighbor in _axis_neighbors(strategy, spec.steps):
             result = evaluate_strategy(
                 context,
                 neighbor,
                 phases=("discovery", "validation"),
             )
-            if result["holdout_revealed"]:
+            if result.get("phases_evaluated") != ["discovery", "validation"]:
+                raise RuntimeError("robustness phase isolation failed")
+            if result.get("holdout_revealed"):
                 raise RuntimeError("robustness phase isolation failed")
             discovery_windows = [
                 row for row in result["windows"] if row["phase"] == "discovery"
@@ -179,6 +200,7 @@ def run_robustness(
                     "direction": direction,
                     "diagnostic_only": True,
                     "strategy": asdict(neighbor),
+                    "candidate_fingerprint_sha256": candidate_fingerprint(neighbor),
                     "discovery": discovery_aggregate,
                     "validation": validation_aggregate,
                     "validation_gate_pass": not validation_reasons,
@@ -186,7 +208,7 @@ def run_robustness(
                 }
             )
 
-        metrics = _neighborhood_metrics(center, neighbor_rows)
+        metrics = _neighborhood_metrics(center, neighbor_rows, spec.gates)
         failures = _robustness_gate_failures(metrics, spec.gates)
         status = "ROBUST" if not failures else "FRAGILE"
         if status == "ROBUST":
@@ -216,16 +238,104 @@ def run_robustness(
         "study_fingerprint_sha256": study_fingerprint(context.spec),
         "dataset_fingerprint_sha256": context.spec.dataset_fingerprint_sha256,
         "symbol": context.spec.symbol,
+        "execution": asdict(context.spec.execution),
         "parameters_retuned": False,
         "neighbor_strategies_promotable": False,
         "discovery_accessed": True,
         "validation_accessed": True,
         "holdout_accessed": False,
         "center_count": len(rows),
+        "neighbor_evaluations": planned,
         "robust_count": robust_count,
         "fragile_count": len(rows) - robust_count,
         "centers": rows,
     }
+
+
+def verify_validation_result(payload: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    if payload.get("schema_version") != 1:
+        problems.append("unsupported validation-result schema_version")
+    if payload.get("kind") != "parameter_extract.validation_result":
+        problems.append("validation-result kind is invalid")
+    if payload.get("parameters_retuned") is not False:
+        problems.append("validation result does not prove parameters stayed frozen")
+    if payload.get("discovery_accessed") is not False:
+        problems.append("validation result indicates discovery access")
+    if payload.get("validation_accessed") is not True:
+        problems.append("validation result does not indicate validation access")
+    if payload.get("holdout_accessed") is not False:
+        problems.append("validation result indicates holdout access")
+
+    validation_payload = payload.get("validation_spec")
+    if not isinstance(validation_payload, dict):
+        problems.append("validation_spec is missing or invalid")
+    else:
+        try:
+            gates_payload = validation_payload["gates"]
+            validation_spec = ValidationSpec(
+                name=str(validation_payload["name"]),
+                source_candidate_set_fingerprint_sha256=str(
+                    validation_payload["source_candidate_set_fingerprint_sha256"]
+                ),
+                gates=ValidationGates(**gates_payload),
+            )
+            expected_validation_fp = validation_fingerprint(validation_spec)
+            if payload.get("validation_fingerprint_sha256") != expected_validation_fp:
+                problems.append("validation fingerprint does not match validation_spec")
+            if (
+                payload.get("source_candidate_set_fingerprint_sha256")
+                != validation_spec.source_candidate_set_fingerprint_sha256
+            ):
+                problems.append("validation source candidate-set fingerprint is inconsistent")
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"validation_spec is invalid: {exc}")
+
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        problems.append("validation candidate list is missing or invalid")
+        return problems
+    if payload.get("candidate_count") != len(candidates):
+        problems.append("validation candidate_count does not match candidate list length")
+
+    promoted = 0
+    rejected = 0
+    seen: set[str] = set()
+    for index, row in enumerate(candidates):
+        if not isinstance(row, dict):
+            problems.append(f"candidate {index}: row is invalid")
+            continue
+        try:
+            strategy = StrategySpec(**row["strategy"])
+            actual_candidate_fp = candidate_fingerprint(strategy)
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"candidate {index}: invalid strategy: {exc}")
+            continue
+        expected_candidate_fp = row.get("candidate_fingerprint_sha256")
+        if expected_candidate_fp != actual_candidate_fp:
+            problems.append(f"candidate {index}: strategy fingerprint mismatch")
+        if actual_candidate_fp in seen:
+            problems.append(f"candidate {index}: duplicate strategy fingerprint")
+        seen.add(actual_candidate_fp)
+
+        status = row.get("promotion_status")
+        reasons = row.get("rejection_reasons")
+        if status == "PASS":
+            promoted += 1
+            if reasons not in ([], None):
+                problems.append(f"candidate {index}: PASS candidate has rejection reasons")
+        elif status == "REJECT":
+            rejected += 1
+            if not isinstance(reasons, list) or not reasons:
+                problems.append(f"candidate {index}: REJECT candidate lacks rejection reasons")
+        else:
+            problems.append(f"candidate {index}: invalid promotion_status")
+
+    if payload.get("promoted_count") != promoted:
+        problems.append("promoted_count does not match PASS candidates")
+    if payload.get("rejected_count") != rejected:
+        problems.append("rejected_count does not match REJECT candidates")
+    return problems
 
 
 def _axis_neighbors(
@@ -235,7 +345,9 @@ def _axis_neighbors(
     base = asdict(center)
     if steps.include_rsi_period:
         for direction, delta in (("minus", -1), ("plus", 1)):
-            proposals.append(("rsi_period", direction, {**base, "rsi_period": center.rsi_period + delta}))
+            proposals.append(
+                ("rsi_period", direction, {**base, "rsi_period": center.rsi_period + delta})
+            )
     for axis, step in (
         ("rsi_entry", steps.rsi_entry),
         ("adx_min", steps.adx_min),
@@ -279,15 +391,15 @@ def _axis_neighbors(
 
     neighbors: list[tuple[str, str, StrategySpec]] = []
     seen: set[str] = set()
-    for axis, direction, payload in proposals:
+    for axis, direction, proposal in proposals:
         try:
-            neighbor = StrategySpec(**payload)
+            neighbor = StrategySpec(**proposal)
         except (TypeError, ValueError):
             continue
-        key = json.dumps(asdict(neighbor), sort_keys=True, separators=(",", ":"))
-        if key in seen:
+        fingerprint = candidate_fingerprint(neighbor)
+        if fingerprint in seen:
             continue
-        seen.add(key)
+        seen.add(fingerprint)
         neighbors.append((axis, direction, neighbor))
     return neighbors
 
@@ -360,16 +472,25 @@ def _validation_gate_failures(
 
 
 def _neighborhood_metrics(
-    center: dict[str, Any], neighbors: list[dict[str, Any]]
+    center: dict[str, Any],
+    neighbors: list[dict[str, Any]],
+    gates: RobustnessGates,
 ) -> dict[str, Any]:
     validation_returns = [
         float(row["validation"]["compounded_window_return_pct"]) for row in neighbors
+    ]
+    discovery_positive_fractions = [
+        float(row["discovery"]["positive_window_fraction"]) for row in neighbors
     ]
     center_validation_return = float(
         center["validation"]["aggregate"]["compounded_window_return_pct"]
     )
     median_validation_return = (
         statistics.median(validation_returns) if validation_returns else 0.0
+    )
+    stable_discovery_neighbors = sum(
+        value >= gates.min_neighbor_discovery_positive_window_fraction
+        for value in discovery_positive_fractions
     )
     return {
         "neighbor_count": len(neighbors),
@@ -378,14 +499,16 @@ def _neighborhood_metrics(
             if not neighbors
             else sum(bool(row["validation_gate_pass"]) for row in neighbors) / len(neighbors)
         ),
-        "discovery_positive_fraction": (
-            0.0
-            if not neighbors
-            else sum(
-                row["discovery"]["positive_window_fraction"] > 0.5
-                for row in neighbors
-            )
-            / len(neighbors)
+        "discovery_stable_neighbor_fraction": (
+            0.0 if not neighbors else stable_discovery_neighbors / len(neighbors)
+        ),
+        "neighbor_discovery_positive_window_fraction_threshold": (
+            gates.min_neighbor_discovery_positive_window_fraction
+        ),
+        "median_neighbor_discovery_positive_window_fraction": (
+            statistics.median(discovery_positive_fractions)
+            if discovery_positive_fractions
+            else 0.0
         ),
         "center_validation_compounded_return_pct": center_validation_return,
         "median_neighbor_validation_compounded_return_pct": median_validation_return,
@@ -404,7 +527,10 @@ def _robustness_gate_failures(
         reasons.append("NEIGHBOR_COUNT")
     if metrics["validation_pass_fraction"] < gates.min_validation_pass_fraction:
         reasons.append("VALIDATION_NEIGHBOR_SURVIVAL")
-    if metrics["discovery_positive_fraction"] < gates.min_discovery_positive_fraction:
+    if (
+        metrics["discovery_stable_neighbor_fraction"]
+        < gates.min_discovery_stable_neighbor_fraction
+    ):
         reasons.append("DISCOVERY_NEIGHBOR_STABILITY")
     if (
         gates.max_center_validation_advantage_pct is not None
