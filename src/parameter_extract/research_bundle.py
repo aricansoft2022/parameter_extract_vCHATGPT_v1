@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -165,6 +167,8 @@ def verify_research_bundle(
         raise ValueError("bundle calibration does not reference the exact bundled study")
 
     stage_budgets: list[int] = []
+    exact_discovery_stages: list[str] = []
+    required_safe = search.refinement.max_candidates
     for stage in calibration.stages:
         stage_search_path = _resolve_contract_path(
             calibration_path.parent,
@@ -183,11 +187,20 @@ def verify_research_bundle(
                 f"bundle calibration stage {stage.name!r} candidate budget drift"
             )
         stage_budgets.append(stage.expected_max_candidates)
+        if (
+            stage_search_fp == current_search_fp
+            and stage.expected_max_candidates == required_safe
+        ):
+            exact_discovery_stages.append(stage.name)
 
-    required_safe = search.refinement.max_candidates
     if max(stage_budgets) < required_safe:
         raise ValueError(
             "bundle calibration ladder never reaches the discovery search candidate budget"
+        )
+    if not exact_discovery_stages:
+        raise ValueError(
+            "bundle calibration ladder must contain the exact discovery search contract "
+            "at its declared candidate budget"
         )
 
     return {
@@ -201,6 +214,7 @@ def verify_research_bundle(
         "calibration_fingerprint_sha256": spec.calibration_fingerprint_sha256,
         "required_safe_max_candidates": required_safe,
         "calibration_stage_budgets": stage_budgets,
+        "exact_discovery_calibration_stages": exact_discovery_stages,
         "manifest_verified": True,
         "contract_lineage_verified": True,
         "ready_for_calibration": True,
@@ -234,10 +248,15 @@ def run_bundle_calibration(
         raise RuntimeError("bundle calibration result belongs to a different study")
     if result.get("dataset_fingerprint_sha256") != spec.dataset_fingerprint_sha256:
         raise RuntimeError("bundle calibration result belongs to a different dataset")
+    if result.get("machine") != _current_machine_metadata():
+        raise RuntimeError("bundle calibration result machine metadata drift")
     result["research_bundle"] = {
         "bundle": spec.name,
         "bundle_fingerprint_sha256": verification["bundle_fingerprint_sha256"],
         "required_safe_max_candidates": verification["required_safe_max_candidates"],
+        "exact_discovery_calibration_stages": verification[
+            "exact_discovery_calibration_stages"
+        ],
     }
     result["scale_calibration_result_fingerprint_sha256"] = (
         scale_calibration_result_fingerprint(result)
@@ -277,6 +296,10 @@ def run_bundle_discovery(
         raise ValueError("calibration result belongs to a different bundle study")
     if calibration_result.get("dataset_fingerprint_sha256") != spec.dataset_fingerprint_sha256:
         raise ValueError("calibration result belongs to a different bundle dataset")
+    if calibration_result.get("machine") != _current_machine_metadata():
+        raise RuntimeError(
+            "discovery blocked: scale calibration was produced on a different machine/runtime"
+        )
 
     safe_max = calibration_result.get("safe_max_candidates")
     required_safe = verification["required_safe_max_candidates"]
@@ -284,6 +307,17 @@ def run_bundle_discovery(
         raise RuntimeError(
             "discovery blocked: calibration safe_max_candidates does not cover the "
             f"discovery search budget ({safe_max!r} < {required_safe})"
+        )
+    passed_stage_names = {
+        row.get("name")
+        for row in calibration_result.get("stage_results", [])
+        if isinstance(row, dict) and row.get("status") == "PASS"
+    }
+    if not passed_stage_names.intersection(
+        verification["exact_discovery_calibration_stages"]
+    ):
+        raise RuntimeError(
+            "discovery blocked: the exact discovery-search calibration stage did not PASS"
         )
 
     result = run_bulk_search(study_path, search_path, data_directory=data_directory)
@@ -312,8 +346,12 @@ def run_bundle_discovery(
         "calibration_result_fingerprint_sha256": calibration_result.get(
             "scale_calibration_result_fingerprint_sha256"
         ),
+        "calibrated_machine": calibration_result.get("machine"),
         "calibrated_safe_max_candidates": safe_max,
         "required_safe_max_candidates": required_safe,
+        "exact_discovery_calibration_stages": verification[
+            "exact_discovery_calibration_stages"
+        ],
         "calibration_gate_passed": True,
     }
     return result
@@ -338,6 +376,16 @@ def _resolve_contract_path(
     if not path.is_file():
         raise ValueError(f"{label} does not exist: {relative}")
     return path
+
+
+def _current_machine_metadata() -> dict[str, Any]:
+    return {
+        "python_version": platform.python_version(),
+        "implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+    }
 
 
 def _validate_digest(value: str) -> None:
