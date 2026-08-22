@@ -25,7 +25,7 @@ The project is intentionally built as a chain of research gates rather than a pr
 16. **Deterministic work profiling** — query/entry work counters are machine-independent and wall-clock benchmarking remains separate, so the next optimization is chosen from measured work rather than intuition.
 17. **Fail-closed scale calibration** — increasing candidate budgets are exercised on the target dataset/machine under explicit time/heap limits; `safe_max_candidates` is only the last passing stage and is never auto-applied.
 18. **Calibrated research bundle** — manifest, study, exact discovery search and scale-calibration contracts are pinned together; discovery is blocked unless the exact intended grid has passed calibration on the same machine/runtime. The final `bundle.json` can be deterministically sealed from those authored contracts rather than hand-assembling bundle-level fingerprints.
-19. **Accepted paramderive data migration** — the previously verified Binance BTC1/funding monthly store can be migrated read-only into bundle-ready CSV data while preserving source hashes/verification provenance and avoiding nondeterministic acceptance timestamps in dataset identity.
+19. **Accepted paramderive source preflight + migration** — the previously verified Binance BTC1/funding monthly store can be validated read-only, compared with the archived legacy fingerprint, and migrated into bundle-ready CSV data while keeping candle warm-up and funding-required boundaries explicit and avoiding nondeterministic acceptance timestamps in the new dataset identity.
 
 No universal large-grid cap is claimed. A 50k/100k/1M budget is considered safe only after the exact bundled discovery grid passes its explicit calibration contract on the machine that will run it.
 
@@ -49,7 +49,8 @@ No universal large-grid cap is claimed. A 50k/100k/1M budget is considered safe 
 - **Calibration is machine-specific.** A safe-cap artifact from a different Python/platform/CPU environment cannot authorize discovery.
 - **Bundles are sealed, not hand-patched.** Bundle-level fingerprints are computed from authored contracts and the final bundle is published only after static lineage/data verification.
 - **Accepted source data is migrated, not reinterpreted.** Raw BTC1 OHLC and raw funding rates are carried forward without applying legacy funding multipliers, leverage or liquidation assumptions; unavailable volume/mark-price fields are explicit and documented.
-- **Operational timestamps are not market identity.** Legacy `accepted_at_utc`/`sync_status` do not change semantic source provenance when the verified market bytes and substantive verification evidence are unchanged.
+- **Warm-up candles and funding coverage are separate.** A candle-only warm-up month before `funding_required_from` is valid and must not invent a funding requirement that the archived research contract never had.
+- **Operational timestamps are not market identity.** Legacy `accepted_at_utc`/`sync_status` can alter the old raw-manifest fingerprint but do not change normalized source provenance when the verified market bytes and substantive verification evidence are unchanged.
 - **Robust region before best point.** A local plateau matters more than a single spike.
 - **No-loss is metadata, not a crown.** Zero historical losers can be an overfit symptom.
 - **Open-at-end is censored data.** The engine never fabricates an exit at a calendar or study-window boundary.
@@ -111,18 +112,33 @@ Real minute gaps are recorded, not forward-filled. Duplicate or backward timesta
 
 If the existing `backtest_vCHATGPT_v5.0` ACCEPTED BTC1/funding monthly store is still available, prefer migrating that verified lineage instead of building a second downloader policy. See [`docs/LEGACY_DATA_MIGRATION.md`](docs/LEGACY_DATA_MIGRATION.md).
 
-Example using the paths documented by the old engine:
+For the archived 2026-08-07 source coverage, first run the read-only preflight:
 
 ```bash
 pextract-migrate-paramderive \
   --btc1-root ../past_BNN_data/data/BTCUSDT/1m \
   --funding-root ../backtest_vCHATGPT_v5.0/market-data/funding/BTCUSDT \
   --start 2019-12 \
+  --funding-start 2020-01 \
   --end 2026-07 \
+  --legacy-fingerprint-reference 19e566d197f1266094faed171c6ee4936b822b3d5f061e8b405604b8aff5021c \
+  --preflight-only
+```
+
+Then migrate the accepted source into the new normalized lineage:
+
+```bash
+pextract-migrate-paramderive \
+  --btc1-root ../past_BNN_data/data/BTCUSDT/1m \
+  --funding-root ../backtest_vCHATGPT_v5.0/market-data/funding/BTCUSDT \
+  --start 2019-12 \
+  --funding-start 2020-01 \
+  --end 2026-07 \
+  --legacy-fingerprint-reference 19e566d197f1266094faed171c6ee4936b822b3d5f061e8b405604b8aff5021c \
   --output-directory btc-run-2026/data
 ```
 
-The migration re-verifies each source month's ACCEPTED manifest and data SHA, decodes BTC1/funding losslessly where those formats retain the field, and atomically publishes `candles.csv`, `funding.csv`, pinned `source-provenance.json` and `data-manifest.json`. It never modifies the source store. Use the last complete month you actually have; do not substitute the example end date blindly.
+The migration re-verifies each required source month's ACCEPTED manifest and data SHA, decodes BTC1/funding losslessly where those formats retain the field, and atomically publishes `candles.csv`, `funding.csv`, normalized/pinned `source-provenance.json`, operational `legacy-preflight.json` and `data-manifest.json`. The raw legacy fingerprint sidecar is intentionally excluded from the new dataset identity because the old algorithm hashes nondeterministic acceptance metadata. It never modifies the source store.
 
 ## Live-bot parity gate
 
@@ -417,4 +433,4 @@ timestamp_ms,rate,mark_price
 
 ## Next milestone
 
-The engine and provenance chain are now ready to be exercised on the already-verified real-data lineage. If the accepted paramderive monthly store is present on the target machine, migrate the desired complete-month range first, author the study/search/calibration contracts around that migrated manifest, seal the bundle, run `pextract-bundle calibrate`, then produce the canonical bundled discovery artifact. Only measured real-data work profiles and calibration results should determine whether another acceleration layer or a larger candidate budget is justified.
+The next operation belongs on the target machine that actually holds the ACCEPTED monthly store: run the read-only canonical source preflight first, then migrate the verified candle/funding ranges into a new normalized `data-manifest.json`. After that, author the study/search/calibration contracts around the resulting dataset fingerprint, seal the bundle, calibrate that same machine, and produce the canonical bundled discovery artifact. Only measured real-data work profiles and calibration results should determine whether another acceleration layer or a larger candidate budget is justified.
