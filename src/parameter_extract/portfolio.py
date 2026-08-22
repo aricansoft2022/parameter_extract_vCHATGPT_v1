@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from .families import (
     FamilySpec,
     FamilyThresholds,
     ParameterScales,
+    _representative_sort_key,
     family_fingerprint,
 )
 from .manifest import sha256_file
@@ -31,6 +33,7 @@ from .signals import ONE_MINUTE_MS, Signal, generate_signals
 from .study import StudyContext, WindowSpec, load_study_context, study_fingerprint
 
 PORTFOLIO_SCHEMA_VERSION = 1
+REPRESENTATIVE_POLICY = "robustness_stability_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +172,13 @@ def run_portfolio(
             )
 
     aggregate = _aggregate_portfolio_windows(windows, slot_count=spec.slot_count)
+    phase_aggregates = {
+        phase: _aggregate_portfolio_windows(
+            [row for row in windows if row["phase"] == phase],
+            slot_count=spec.slot_count,
+        )
+        for phase in ("discovery", "validation")
+    }
     return {
         "schema_version": 1,
         "kind": "parameter_extract.portfolio_replay",
@@ -185,6 +195,7 @@ def run_portfolio(
         "priority_source": "explicit_portfolio_contract",
         "leverage_applied": False,
         "return_basis": "equal_fixed_unlevered_slot_baseline",
+        "slot_utilization_assumption": "occupied_at_candle_open_counts_full_minute",
         "discovery_accessed": True,
         "validation_accessed": True,
         "holdout_accessed": False,
@@ -200,6 +211,7 @@ def run_portfolio(
             for row in candidates
         ],
         "aggregate": aggregate,
+        "phase_aggregates": phase_aggregates,
         "windows": windows,
     }
 
@@ -214,6 +226,8 @@ def verify_families_result(payload: dict[str, Any]) -> list[str]:
         problems.append("families result does not prove frozen parameters")
     if payload.get("representatives_are_existing_robust_centers") is not True:
         problems.append("family representatives are not proven existing robust centers")
+    if payload.get("representative_policy") != REPRESENTATIVE_POLICY:
+        problems.append("family representative policy is missing or unsupported")
     if payload.get("discovery_accessed") is not True:
         problems.append("families result does not indicate discovery access")
     if payload.get("validation_accessed") is not True:
@@ -265,11 +279,41 @@ def verify_families_result(payload: dict[str, Any]) -> list[str]:
         problems.append("representative count does not match family count")
 
     robust_center_count = int(payload.get("robust_center_count", -1))
+    if robust_center_count < 1:
+        problems.append("robust_center_count must be positive")
     if payload.get("deduplicated_center_count") != robust_center_count - len(families):
         problems.append("deduplicated_center_count is inconsistent")
     expected_pairs = robust_center_count * (robust_center_count - 1) // 2
     if payload.get("pair_evaluations") != expected_pairs or len(pairwise) != expected_pairs:
         problems.append("pairwise evidence count is inconsistent")
+
+    pair_lookup: dict[frozenset[str], dict[str, Any]] = {}
+    pair_endpoints: set[str] = set()
+    for index, row in enumerate(pairwise):
+        if not isinstance(row, dict):
+            problems.append(f"pair {index}: invalid row")
+            continue
+        left = row.get("left")
+        right = row.get("right")
+        if not isinstance(left, str) or not isinstance(right, str) or left == right:
+            problems.append(f"pair {index}: invalid endpoints")
+            continue
+        key = frozenset((left, right))
+        if key in pair_lookup:
+            problems.append(f"pair {index}: duplicate pair endpoints")
+        pair_lookup[key] = row
+        pair_endpoints.update((left, right))
+        for metric in (
+            "raw_signal_dice",
+            "accepted_signal_dice",
+            "exposure_jaccard",
+            "parameter_distance",
+            "parameter_distance_similarity",
+            "family_score",
+        ):
+            value = row.get(metric)
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                problems.append(f"pair {index}: {metric} is not finite numeric evidence")
 
     representative_by_family: dict[str, dict[str, Any]] = {}
     seen_rep_fps: set[str] = set()
@@ -302,19 +346,25 @@ def verify_families_result(payload: dict[str, Any]) -> list[str]:
         if not isinstance(family_id, str) or not isinstance(members, list) or not members:
             problems.append(f"family {index}: missing id or members")
             continue
+        if family.get("representative_selection") != REPRESENTATIVE_POLICY:
+            problems.append(f"family {index}: representative policy mismatch")
         if family.get("member_count") != len(members):
             problems.append(f"family {index}: member_count mismatch")
         rep = representative_by_family.get(family_id)
         if rep is None:
             problems.append(f"family {index}: missing representative row")
         member_fps: set[str] = set()
+        sortable_members: list[dict[str, Any]] = []
         for member_index, member in enumerate(members):
             try:
                 strategy = StrategySpec(**member["strategy"])
                 fingerprint = candidate_fingerprint(strategy)
+                metrics = member["robustness_metrics"]
+                if not isinstance(metrics, dict):
+                    raise TypeError("robustness_metrics must be an object")
             except (KeyError, TypeError, ValueError) as exc:
                 problems.append(
-                    f"family {index} member {member_index}: invalid strategy: {exc}"
+                    f"family {index} member {member_index}: invalid member: {exc}"
                 )
                 continue
             if member.get("candidate_fingerprint_sha256") != fingerprint:
@@ -327,6 +377,12 @@ def verify_families_result(payload: dict[str, Any]) -> list[str]:
                 )
             member_fps.add(fingerprint)
             all_member_fps.add(fingerprint)
+            sortable_members.append(
+                {
+                    "candidate_fingerprint_sha256": fingerprint,
+                    "metrics": metrics,
+                }
+            )
         representative_fp = family.get(
             "representative_candidate_fingerprint_sha256"
         )
@@ -336,9 +392,26 @@ def verify_families_result(payload: dict[str, Any]) -> list[str]:
             problems.append(f"family {index}: representative rows disagree")
         if rep is not None and rep.get("strategy") != family.get("representative_strategy"):
             problems.append(f"family {index}: representative strategies disagree")
+        if sortable_members:
+            expected_rep = sorted(sortable_members, key=_representative_sort_key)[0][
+                "candidate_fingerprint_sha256"
+            ]
+            if representative_fp != expected_rep:
+                problems.append(f"family {index}: representative violates deterministic policy")
+
+        member_list = sorted(member_fps)
+        for left_index, left in enumerate(member_list):
+            for right in member_list[left_index + 1 :]:
+                pair = pair_lookup.get(frozenset((left, right)))
+                if pair is None:
+                    problems.append(f"family {index}: missing within-family pair evidence")
+                elif pair.get("same_family") is not True:
+                    problems.append(f"family {index}: contains a non-family pair")
 
     if len(all_member_fps) != robust_center_count:
         problems.append("family members do not cover robust_center_count exactly")
+    if pair_endpoints - all_member_fps:
+        problems.append("pairwise evidence references unknown family members")
     return problems
 
 
@@ -408,6 +481,14 @@ def _run_portfolio_window(
                 del pending[candidate.family_id]
                 accepted[candidate.family_id] += 1
 
+        # Occupancy is sampled at candle open. A TP may happen earlier than candle close,
+        # but OHLC cannot reveal the exact time, so counting the full minute is conservative.
+        if candle.open_time_ms < window.end_ms and candle.close_time_ms >= window.start_ms:
+            interval_start = max(candle.open_time_ms, window.start_ms)
+            interval_end = min(candle.open_time_ms + ONE_MINUTE_MS, window.end_ms)
+            if interval_end > interval_start:
+                slot_occupancy_ms += len(positions) * (interval_end - interval_start)
+
         # Existing positions use the exact single-team truth primitives for path, funding
         # and exit accounting. Exits free slots before same-close new signals are considered.
         for family_id, held in list(positions.items()):
@@ -475,18 +556,10 @@ def _run_portfolio_window(
                 )
                 accepted[candidate.family_id] += 1
             else:
+                # The slot is reserved now, at signal time, just like a live PENDING_ENTRY.
                 pending[candidate.family_id] = _Pending(
                     signal=signal,
                     slot_no=slot_no,
-                )
-
-        if index + 1 < len(local):
-            next_open = local[index + 1].open_time_ms
-            interval_start = max(candle.close_time_ms, window.start_ms)
-            interval_end = min(next_open, window.end_ms)
-            if interval_end > interval_start:
-                slot_occupancy_ms += (len(positions) + len(pending)) * (
-                    interval_end - interval_start
                 )
 
     open_rows: list[dict[str, Any]] = []
@@ -554,6 +627,7 @@ def _run_portfolio_window(
     window_duration_ms = max(0, window.end_ms - window.start_ms)
     capacity_ms = window_duration_ms * slot_count
     return_sum = sum(row.trade.net_return_pct for row in closed)
+    closed_drawdown = _closed_trade_drawdown(closed, slot_count=slot_count)
     return {
         "phase": phase,
         "name": window.name,
@@ -568,6 +642,7 @@ def _run_portfolio_window(
         "closed_trade_count": len(closed),
         "closed_trade_net_return_sum_pct": return_sum,
         "fixed_baseline_portfolio_return_pct": return_sum / slot_count,
+        "max_fixed_baseline_closed_drawdown_pct": closed_drawdown,
         "slot_utilization_pct": (
             0.0 if capacity_ms == 0 else min(100.0, slot_occupancy_ms / capacity_ms * 100.0)
         ),
@@ -642,6 +717,25 @@ def _prepare_window(
     return local, funding, signals_by_family, points_by_family
 
 
+def _closed_trade_drawdown(closed: Sequence[_Closed], *, slot_count: int) -> float:
+    cumulative = 0.0
+    peak = 0.0
+    drawdown = 0.0
+    ordered = sorted(
+        closed,
+        key=lambda row: (
+            row.trade.exit_time_ms,
+            row.family_id,
+            row.slot_no,
+        ),
+    )
+    for row in ordered:
+        cumulative += row.trade.net_return_pct / slot_count
+        peak = max(peak, cumulative)
+        drawdown = min(drawdown, cumulative - peak)
+    return drawdown
+
+
 def _aggregate_portfolio_windows(
     windows: Sequence[dict[str, Any]], *, slot_count: int
 ) -> dict[str, Any]:
@@ -667,7 +761,15 @@ def _aggregate_portfolio_windows(
         "fixed_baseline_total_return_pct": sum(returns),
         "median_window_return_pct": statistics.median(returns) if returns else 0.0,
         "worst_window_return_pct": min(returns) if returns else 0.0,
-        "max_fixed_baseline_closed_drawdown_pct": max_drawdown,
+        "max_fixed_baseline_window_sequence_drawdown_pct": max_drawdown,
+        "worst_within_window_closed_drawdown_pct": (
+            min(
+                float(row["max_fixed_baseline_closed_drawdown_pct"])
+                for row in windows
+            )
+            if windows
+            else 0.0
+        ),
         "raw_signal_count": raw,
         "accepted_entry_count": accepted,
         "blocked_no_slot_count": blocked,
