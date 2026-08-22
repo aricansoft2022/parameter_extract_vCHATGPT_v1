@@ -60,13 +60,19 @@ class StudySpec:
         _validate_windows(self.discovery, self.validation, self.holdout)
 
 
+@dataclass(frozen=True, slots=True)
+class StudyContext:
+    spec: StudySpec
+    candles: tuple[Candle, ...]
+    funding: tuple[FundingEvent, ...]
+
+
 def load_study_json(path: str | Path) -> StudySpec:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("schema_version") != STUDY_SCHEMA_VERSION:
         raise ValueError("unsupported study schema_version")
     windows = payload.get("windows") or {}
-    execution_payload = payload.get("execution") or {}
-    execution = ExecutionModel(**execution_payload)
+    execution = ExecutionModel(**(payload.get("execution") or {}))
     return StudySpec(
         name=str(payload["name"]),
         symbol=str(payload["symbol"]),
@@ -101,13 +107,9 @@ def study_fingerprint(spec: StudySpec) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def run_study(
-    study_path: str | Path,
-    team_path: str | Path,
-    *,
-    data_directory: str | Path,
-    reveal_holdout: bool = False,
-) -> dict[str, Any]:
+def load_study_context(
+    study_path: str | Path, *, data_directory: str | Path
+) -> StudyContext:
     study_file = Path(study_path)
     spec = load_study_json(study_file)
     manifest_path = (study_file.parent / spec.dataset_manifest).resolve()
@@ -129,36 +131,52 @@ def run_study(
     if problems:
         raise ValueError("dataset manifest verification failed: " + "; ".join(problems))
 
-    candle_name = file_records["candles"]["path"]
-    funding_record = file_records.get("funding")
     root = Path(data_directory)
-    candles = load_binance_klines_csv(root / candle_name)
+    candles = load_binance_klines_csv(root / file_records["candles"]["path"])
+    funding_record = file_records.get("funding")
     funding = [] if funding_record is None else load_funding_csv(root / funding_record["path"])
-    strategy = load_strategy_json(team_path)
+    return StudyContext(spec=spec, candles=tuple(candles), funding=tuple(funding))
+
+
+def evaluate_strategy(
+    context: StudyContext,
+    strategy: StrategySpec,
+    *,
+    phases: Sequence[Phase] = ("discovery", "validation"),
+    reveal_holdout: bool = False,
+) -> dict[str, Any]:
+    spec = context.spec
     if strategy.symbol != spec.symbol:
         raise ValueError(
             f"team symbol {strategy.symbol} does not match study symbol {spec.symbol}"
         )
+    requested = tuple(phases)
+    unknown = set(requested) - {"discovery", "validation", "holdout"}
+    if unknown:
+        raise ValueError(f"unknown study phase(s): {', '.join(sorted(unknown))}")
+    if "holdout" in requested and not reveal_holdout:
+        raise ValueError("holdout evaluation requires reveal_holdout=True")
 
-    phases: list[tuple[Phase, WindowSpec]] = []
-    phases.extend(("discovery", item) for item in spec.discovery)
-    phases.extend(("validation", item) for item in spec.validation)
-    if reveal_holdout:
-        phases.extend(("holdout", item) for item in spec.holdout)
-
+    phase_windows: dict[Phase, tuple[WindowSpec, ...]] = {
+        "discovery": spec.discovery,
+        "validation": spec.validation,
+        "holdout": spec.holdout,
+    }
     windows = [
         _run_window(
             phase,
             window,
-            candles,
-            funding,
+            context.candles,
+            context.funding,
             strategy,
             spec.execution,
             warmup_candles=spec.warmup_candles,
             min_trades=spec.min_trades,
         )
-        for phase, window in phases
+        for phase in requested
+        for window in phase_windows[phase]
     ]
+    holdout_revealed = "holdout" in requested
     return {
         "schema_version": 1,
         "kind": "parameter_extract.study_result",
@@ -168,10 +186,33 @@ def run_study(
         "symbol": spec.symbol,
         "team": asdict(strategy),
         "execution": asdict(spec.execution),
-        "holdout_revealed": reveal_holdout,
-        "withheld_holdout_windows": 0 if reveal_holdout else len(spec.holdout),
+        "phases_evaluated": list(requested),
+        "holdout_revealed": holdout_revealed,
+        "withheld_holdout_windows": 0 if holdout_revealed else len(spec.holdout),
         "windows": windows,
     }
+
+
+def run_study(
+    study_path: str | Path,
+    team_path: str | Path,
+    *,
+    data_directory: str | Path,
+    reveal_holdout: bool = False,
+) -> dict[str, Any]:
+    context = load_study_context(study_path, data_directory=data_directory)
+    strategy = load_strategy_json(team_path)
+    phases: tuple[Phase, ...] = (
+        ("discovery", "validation", "holdout")
+        if reveal_holdout
+        else ("discovery", "validation")
+    )
+    return evaluate_strategy(
+        context,
+        strategy,
+        phases=phases,
+        reveal_holdout=reveal_holdout,
+    )
 
 
 def _run_window(
