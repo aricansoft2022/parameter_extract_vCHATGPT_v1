@@ -12,6 +12,7 @@ from .models import ExecutionModel
 from .parity import check_parity_fixture
 from .promotion import freeze_discovery_result, run_validation
 from .replay import run_strategy
+from .robustness import run_robustness
 from .search import run_search
 from .study import run_study
 
@@ -72,6 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--validation", dest="validation_file", required=True)
     validate.add_argument("--data-directory", required=True)
     validate.add_argument("--output", required=True)
+
+    robust = sub.add_parser(
+        "robustness",
+        help="diagnose PASS candidates with non-promotable axis-neighborhood variants",
+    )
+    robust.add_argument("--study", dest="study_file", required=True)
+    robust.add_argument("--validation-result", required=True)
+    robust.add_argument("--robustness", dest="robustness_file", required=True)
+    robust.add_argument("--data-directory", required=True)
+    robust.add_argument("--output", required=True)
     return parser
 
 
@@ -93,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         return _freeze_candidates(args)
     if args.command == "validate-candidates":
         return _validate_candidates(args)
+    if args.command == "robustness":
+        return _robustness(args)
     return 2
 
 
@@ -229,6 +242,37 @@ def _validate_candidates(args: argparse.Namespace) -> int:
                 "promoted_count": payload["promoted_count"],
                 "rejected_count": payload["rejected_count"],
                 "parameters_retuned": payload["parameters_retuned"],
+                "holdout_accessed": payload["holdout_accessed"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _robustness(args: argparse.Namespace) -> int:
+    payload = run_robustness(
+        args.study_file,
+        args.validation_result,
+        args.robustness_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "robustness_fingerprint_sha256": payload[
+                    "robustness_fingerprint_sha256"
+                ],
+                "center_count": payload["center_count"],
+                "neighbor_evaluations": payload["neighbor_evaluations"],
+                "robust_count": payload["robust_count"],
+                "fragile_count": payload["fragile_count"],
+                "parameters_retuned": payload["parameters_retuned"],
+                "neighbor_strategies_promotable": payload[
+                    "neighbor_strategies_promotable"
+                ],
                 "holdout_accessed": payload["holdout_accessed"],
             },
             indent=2,
