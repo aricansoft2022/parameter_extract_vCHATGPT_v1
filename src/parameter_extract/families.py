@@ -19,6 +19,7 @@ from .robustness import (
 from .study import collect_strategy_evidence, load_study_context, study_fingerprint
 
 FAMILY_SCHEMA_VERSION = 1
+CROSS_EXIT_MODE_DISTANCE = 1e12
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +228,7 @@ def run_family_clustering(
                     "candidate_fingerprint_sha256"
                 ],
                 "representative_strategy": representative["center_strategy"],
-                "representative_selection": "predeclared robustness evidence only",
+                "representative_selection": "robustness_stability_v1",
                 "member_count": len(cluster),
                 "members": [
                     {
@@ -259,6 +260,7 @@ def run_family_clustering(
         "family": spec.name,
         "family_fingerprint_sha256": family_fingerprint(spec),
         "family_spec": asdict(spec),
+        "representative_policy": "robustness_stability_v1",
         "source_robustness_result_sha256": actual_robustness_sha,
         "study_fingerprint_sha256": study_fingerprint(context.spec),
         "dataset_fingerprint_sha256": context.spec.dataset_fingerprint_sha256,
@@ -539,7 +541,9 @@ def _parameter_distance(
     scales: ParameterScales,
 ) -> float:
     if left.exit_mode != right.exit_mode:
-        return math.inf
+        # A large finite sentinel keeps persisted pair evidence strict-JSON compatible while
+        # the separate `same_exit_mode` gate guarantees these strategies cannot share a V1 family.
+        return CROSS_EXIT_MODE_DISTANCE
     values = [
         (left.rsi_period - right.rsi_period) / scales.rsi_period,
         (left.rsi_entry - right.rsi_entry) / scales.rsi_entry,
