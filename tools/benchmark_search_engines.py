@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         data_directory=args.data_directory,
     )
     _assert_parity(query, bulk, label="query/bulk")
+    if query.get("query_work_profile") != bulk.get("query_work_profile"):
+        raise RuntimeError(
+            "benchmark aborted because query/bulk deterministic query-work profiles differ"
+        )
 
     payload = {
         "schema_version": 1,
@@ -105,13 +109,22 @@ def main(argv: list[str] | None = None) -> int:
         "cached_over_bulk_speed_ratio": (
             None if bulk_seconds == 0.0 else cached_seconds / bulk_seconds
         ),
+        "query_work_profile": query["query_work_profile"],
+        "bulk_query_work_profile": bulk["query_work_profile"],
+        "bulk_entry_event_visits": bulk["bulk_entry_event_visits"],
+        "bulk_entry_band_membership_checks": bulk[
+            "bulk_entry_band_membership_checks"
+        ],
+        "bulk_keywise_event_scan_upper_bound": bulk[
+            "keywise_event_scan_upper_bound"
+        ],
         "bulk_event_scan_reduction_fraction": bulk[
             "event_scan_reduction_fraction"
         ],
         "note": (
-            "Wall-clock result for this machine/dataset/grid only. Exact research-output "
-            "parity is checked before timing is reported; ratios are not universal speed "
-            "guarantees."
+            "Wall-clock result is for this machine/dataset/grid only. Exact research-output "
+            "parity and deterministic query-work-profile equality are checked before timing "
+            "is reported; ratios are not universal speed guarantees."
         ),
     }
     text = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"

@@ -29,6 +29,7 @@ from .search import (
     search_fingerprint,
 )
 from .study import StudyContext, load_study_context, study_fingerprint
+from .work_profile import QueryWorkProfile
 
 QUERY_SEARCH_ENGINE = "exit_query_exact_v1"
 
@@ -64,6 +65,7 @@ def run_query_search(
     query_checked = _runtime_query_parity_check(context, cache, query, coarse)
     cache.clear()
 
+    work_profile = QueryWorkProfile()
     evaluated: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for strategy in coarse:
@@ -71,7 +73,16 @@ def run_query_search(
         if key in seen:
             continue
         seen.add(key)
-        evaluated.append(_evaluate_query_candidate(context, cache, query, strategy, stage="coarse"))
+        evaluated.append(
+            _evaluate_query_candidate(
+                context,
+                cache,
+                query,
+                strategy,
+                stage="coarse",
+                work_profile=work_profile,
+            )
+        )
 
     gated = [row for row in evaluated if _passes_gates(row["aggregate"], spec.gates)]
     frontier = _pareto_frontier(gated)
@@ -98,6 +109,7 @@ def run_query_search(
                         query,
                         refined,
                         stage="refined",
+                        work_profile=work_profile,
                     )
                 )
                 refined_count += 1
@@ -136,10 +148,12 @@ def run_query_search(
         "entry_signal_cache_hits": cache.hits,
         "entry_signal_cache_hit_fraction": cache_hit_fraction,
         "unique_entry_signal_keys": cache.unique_keys,
+        "query_work_profile": work_profile.as_dict(),
         "reference_full_candle_replay_visits_upper_bound": reference_candle_visits_upper_bound,
         "replay_acceleration_note": (
             "The query engine skips the per-candidate full candle replay loop for exit discovery. "
-            "This upper bound is a reference-work counter, not a measured wall-clock speedup."
+            "The work profile contains deterministic logical counters; the candle upper bound "
+            "and counters are not measured wall-clock speedups."
         ),
         "pareto_objectives": list(PARETO_OBJECTIVES),
         "frontier_order_note": (
@@ -194,8 +208,11 @@ def _evaluate_query_candidate(
     strategy: StrategySpec,
     *,
     stage: str,
+    work_profile: QueryWorkProfile | None = None,
 ) -> dict[str, Any]:
     compact_windows = evaluate_query_discovery(context, cache, query, strategy)
+    if work_profile is not None:
+        work_profile.record(compact_windows, query.windows)
     return {
         "stage": stage,
         "strategy": asdict(strategy),
