@@ -109,6 +109,21 @@ def _write_bundle(tmp_path: Path, *, discovery_cap: int = 100, calibration_cap: 
     search_path.write_text(json.dumps(search_payload), encoding="utf-8")
     search_fp = search_fingerprint(load_search_json(search_path))
 
+    if calibration_cap == discovery_cap:
+        stage_search_file = "search.json"
+        stage_search_fp = search_fp
+    else:
+        calibration_search_payload = dict(search_payload)
+        calibration_search_payload["name"] = "bundle calibration"
+        calibration_search_payload["refinement"] = dict(search_payload["refinement"])
+        calibration_search_payload["refinement"]["max_candidates"] = calibration_cap
+        calibration_search_path = tmp_path / "calibration-search.json"
+        calibration_search_path.write_text(
+            json.dumps(calibration_search_payload), encoding="utf-8"
+        )
+        stage_search_file = "calibration-search.json"
+        stage_search_fp = search_fingerprint(load_search_json(calibration_search_path))
+
     calibration_payload = {
         "schema_version": 1,
         "name": "bundle scale",
@@ -118,8 +133,8 @@ def _write_bundle(tmp_path: Path, *, discovery_cap: int = 100, calibration_cap: 
         "stages": [
             {
                 "name": "stage-1",
-                "search_file": "calibration-search.json",
-                "search_fingerprint_sha256": "0" * 64,
+                "search_file": stage_search_file,
+                "search_fingerprint_sha256": stage_search_fp,
                 "expected_max_candidates": calibration_cap,
                 "min_evaluated_candidates": 1,
                 "max_elapsed_seconds": 60.0,
@@ -127,14 +142,6 @@ def _write_bundle(tmp_path: Path, *, discovery_cap: int = 100, calibration_cap: 
             }
         ],
     }
-    calibration_search_payload = dict(search_payload)
-    calibration_search_payload["name"] = "bundle calibration"
-    calibration_search_payload["refinement"] = dict(search_payload["refinement"])
-    calibration_search_payload["refinement"]["max_candidates"] = calibration_cap
-    calibration_search_path = tmp_path / "calibration-search.json"
-    calibration_search_path.write_text(json.dumps(calibration_search_payload), encoding="utf-8")
-    calibration_search_fp = search_fingerprint(load_search_json(calibration_search_path))
-    calibration_payload["stages"][0]["search_fingerprint_sha256"] = calibration_search_fp
     calibration_path = tmp_path / "calibration.json"
     calibration_path.write_text(json.dumps(calibration_payload), encoding="utf-8")
     calibration_fp = scale_calibration_fingerprint(load_scale_calibration_json(calibration_path))
@@ -156,6 +163,10 @@ def _write_bundle(tmp_path: Path, *, discovery_cap: int = 100, calibration_cap: 
     return bundle_path, bundle_payload
 
 
+def _machine() -> dict:
+    return bundle_module._current_machine_metadata()
+
+
 def test_bundle_preflight_verifies_static_lineage_without_touching_phases(tmp_path: Path):
     bundle_path, payload = _write_bundle(tmp_path)
     result = verify_research_bundle(bundle_path, data_directory=tmp_path)
@@ -165,6 +176,7 @@ def test_bundle_preflight_verifies_static_lineage_without_touching_phases(tmp_pa
     assert result["dataset_fingerprint_sha256"] == payload["dataset_fingerprint_sha256"]
     assert result["required_safe_max_candidates"] == 100
     assert result["calibration_stage_budgets"] == [100]
+    assert result["exact_discovery_calibration_stages"] == ["stage-1"]
     assert result["manifest_verified"] is True
     assert result["contract_lineage_verified"] is True
     assert result["ready_for_calibration"] is True
@@ -191,6 +203,27 @@ def test_bundle_rejects_calibration_ladder_that_never_reaches_discovery_budget(t
         verify_research_bundle(bundle_path, data_directory=tmp_path)
 
 
+def test_bundle_rejects_same_budget_calibration_with_different_grid(tmp_path: Path):
+    bundle_path, bundle_payload = _write_bundle(tmp_path)
+    search_payload = json.loads((tmp_path / "search.json").read_text(encoding="utf-8"))
+    search_payload["name"] = "different calibration grid"
+    other_path = tmp_path / "other-search.json"
+    other_path.write_text(json.dumps(search_payload), encoding="utf-8")
+    other_fp = search_fingerprint(load_search_json(other_path))
+
+    calibration_payload = json.loads((tmp_path / "calibration.json").read_text(encoding="utf-8"))
+    calibration_payload["stages"][0]["search_file"] = "other-search.json"
+    calibration_payload["stages"][0]["search_fingerprint_sha256"] = other_fp
+    (tmp_path / "calibration.json").write_text(json.dumps(calibration_payload), encoding="utf-8")
+    bundle_payload["calibration_fingerprint_sha256"] = scale_calibration_fingerprint(
+        load_scale_calibration_json(tmp_path / "calibration.json")
+    )
+    bundle_path.write_text(json.dumps(bundle_payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain the exact discovery search contract"):
+        verify_research_bundle(bundle_path, data_directory=tmp_path)
+
+
 def test_bundle_calibration_recomputes_scale_result_fingerprint_after_metadata(
     tmp_path: Path, monkeypatch
 ):
@@ -201,6 +234,7 @@ def test_bundle_calibration_recomputes_scale_result_fingerprint_after_metadata(
         "calibration_fingerprint_sha256": payload["calibration_fingerprint_sha256"],
         "study_fingerprint_sha256": payload["study_fingerprint_sha256"],
         "dataset_fingerprint_sha256": payload["dataset_fingerprint_sha256"],
+        "machine": _machine(),
         "safe_max_candidates": 100,
     }
     calibration_result["scale_calibration_result_fingerprint_sha256"] = (
@@ -216,6 +250,7 @@ def test_bundle_calibration_recomputes_scale_result_fingerprint_after_metadata(
 
     result = run_bundle_calibration(bundle_path, data_directory=tmp_path)
     assert result["research_bundle"]["required_safe_max_candidates"] == 100
+    assert result["research_bundle"]["exact_discovery_calibration_stages"] == ["stage-1"]
     assert result["scale_calibration_result_fingerprint_sha256"] == (
         scale_calibration_result_fingerprint(result)
     )
@@ -227,7 +262,9 @@ def test_bundle_discovery_blocks_when_safe_cap_is_too_small(tmp_path: Path, monk
         "calibration_fingerprint_sha256": payload["calibration_fingerprint_sha256"],
         "study_fingerprint_sha256": payload["study_fingerprint_sha256"],
         "dataset_fingerprint_sha256": payload["dataset_fingerprint_sha256"],
+        "machine": _machine(),
         "safe_max_candidates": 50,
+        "stage_results": [],
     }
     result_path = tmp_path / "calibration-result.json"
     result_path.write_text(json.dumps(calibration_result), encoding="utf-8")
@@ -245,7 +282,35 @@ def test_bundle_discovery_blocks_when_safe_cap_is_too_small(tmp_path: Path, monk
     assert called is False
 
 
-def test_bundle_discovery_runs_only_after_calibrated_cap_and_adds_lineage(
+def test_bundle_discovery_blocks_calibration_from_different_machine(tmp_path: Path, monkeypatch):
+    bundle_path, payload = _write_bundle(tmp_path)
+    wrong_machine = dict(_machine())
+    wrong_machine["cpu_count"] = (wrong_machine.get("cpu_count") or 1) + 1
+    calibration_result = {
+        "calibration_fingerprint_sha256": payload["calibration_fingerprint_sha256"],
+        "study_fingerprint_sha256": payload["study_fingerprint_sha256"],
+        "dataset_fingerprint_sha256": payload["dataset_fingerprint_sha256"],
+        "machine": wrong_machine,
+        "safe_max_candidates": 100,
+        "stage_results": [{"name": "stage-1", "status": "PASS"}],
+    }
+    result_path = tmp_path / "calibration-result.json"
+    result_path.write_text(json.dumps(calibration_result), encoding="utf-8")
+    monkeypatch.setattr(bundle_module, "verify_scale_calibration_result", lambda payload: [])
+    called = False
+
+    def fake_search(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(bundle_module, "run_bulk_search", fake_search)
+    with pytest.raises(RuntimeError, match="different machine/runtime"):
+        run_bundle_discovery(bundle_path, result_path, data_directory=tmp_path)
+    assert called is False
+
+
+def test_bundle_discovery_runs_only_after_exact_grid_calibration_and_adds_lineage(
     tmp_path: Path, monkeypatch
 ):
     bundle_path, payload = _write_bundle(tmp_path)
@@ -253,7 +318,9 @@ def test_bundle_discovery_runs_only_after_calibrated_cap_and_adds_lineage(
         "calibration_fingerprint_sha256": payload["calibration_fingerprint_sha256"],
         "study_fingerprint_sha256": payload["study_fingerprint_sha256"],
         "dataset_fingerprint_sha256": payload["dataset_fingerprint_sha256"],
+        "machine": _machine(),
         "safe_max_candidates": 100,
+        "stage_results": [{"name": "stage-1", "status": "PASS"}],
         "scale_calibration_result_fingerprint_sha256": "f" * 64,
     }
     result_path = tmp_path / "calibration-result.json"
@@ -278,7 +345,10 @@ def test_bundle_discovery_runs_only_after_calibrated_cap_and_adds_lineage(
     )
 
     result = run_bundle_discovery(bundle_path, result_path, data_directory=tmp_path)
-    assert result["research_bundle"]["calibration_gate_passed"] is True
-    assert result["research_bundle"]["calibrated_safe_max_candidates"] == 100
-    assert result["research_bundle"]["required_safe_max_candidates"] == 100
-    assert result["research_bundle"]["calibration_result_sha256"] == sha256_file(result_path)
+    lineage = result["research_bundle"]
+    assert lineage["calibration_gate_passed"] is True
+    assert lineage["calibrated_safe_max_candidates"] == 100
+    assert lineage["required_safe_max_candidates"] == 100
+    assert lineage["exact_discovery_calibration_stages"] == ["stage-1"]
+    assert lineage["calibrated_machine"] == _machine()
+    assert lineage["calibration_result_sha256"] == sha256_file(result_path)
