@@ -4,7 +4,7 @@
 `backtest_vCHATGPT_v5.0` into the CSV + manifest format consumed by `parameter_extract`.
 
 This is a migration path, not a second market-data downloader. The source store remains
-read-only and its verification lineage is preserved in `source-provenance.json`.
+read-only and its verification lineage is preserved in normalized `source-provenance.json`.
 
 ## Source contract
 
@@ -24,16 +24,35 @@ Binance funding archives or the documented pre-archive REST fallback.
 The migration does not trust filenames alone. Every requested month is rechecked against its
 ACCEPTED source manifest and exact stored data SHA before decoding.
 
+## Archived 2026-08-07 reference lineage
+
+The Git-friendly final archive in `backtest_vCHATGPT_v5.0` records:
+
+```text
+candle range:          2019-12 .. 2026-07
+candle months:         80
+candle rows:           3,506,400
+funding required from: 2020-01
+funding range:         2020-01 .. 2026-07
+funding months:        79
+legacy data fingerprint:
+19e566d197f1266094faed171c6ee4936b822b3d5f061e8b405604b8aff5021c
+```
+
+The December 2019 candle month is indicator warm-up. It is intentionally earlier than the
+funding-required boundary. The migration therefore treats candle start and funding start as
+separate contract fields.
+
 ## Typical source directories
 
 The old project documented paths like:
 
 ```text
 ../past_BNN_data/data/BTCUSDT/1m/
+  aralık/2019.bin
+  aralık/2019.json
   ocak/2020.bin
   ocak/2020.json
-  şubat/2020.bin
-  şubat/2020.json
   ...
 
 ../backtest_vCHATGPT_v5.0/market-data/funding/BTCUSDT/
@@ -42,25 +61,69 @@ The old project documented paths like:
   ...
 ```
 
-The funding root may of course live elsewhere on the machine; pass the actual path.
+The funding root may live elsewhere on the machine; pass the actual path.
 
-## Migration
+## Step 1: source preflight
 
-Choose complete UTC months only. For a research lineage beginning in January 2020, keeping
-2019-12 in the dataset is useful because the study engine may need pre-window indicator
-warm-up candles. Do not include an unfinished current month merely to make the dataset look
-more recent.
-
-Example:
+Before writing a multi-gigabyte migrated CSV, validate the local ACCEPTED store and compute
+the exact legacy fingerprint:
 
 ```bash
 pextract-migrate-paramderive \
   --btc1-root ../past_BNN_data/data/BTCUSDT/1m \
   --funding-root ../backtest_vCHATGPT_v5.0/market-data/funding/BTCUSDT \
   --start 2019-12 \
+  --funding-start 2020-01 \
   --end 2026-07 \
+  --legacy-fingerprint-reference 19e566d197f1266094faed171c6ee4936b822b3d5f061e8b405604b8aff5021c \
+  --preflight-only
+```
+
+Preflight performs no output migration. It validates each required source manifest/hash and
+reproduces the exact legacy `prepare.dataset_fingerprint()` algorithm from the pinned reader:
+
+```text
+"funding-required-from:YYYY-MM\n"
++ raw BTC1 monthly manifest bytes
++ BTC1 binary SHA-256 strings
++ raw funding monthly manifest bytes at/after funding_required_from
+```
+
+The report contains both the computed legacy fingerprint and
+`legacy_fingerprint_matches_reference`.
+
+A mismatch is important evidence, but it does not automatically mean the accepted market
+bytes are bad. The old algorithm hashes raw JSON bytes, including operational fields such as
+`accepted_at_utc`; recreating otherwise identical ACCEPTED manifests on another day can
+therefore change the old fingerprint. A mismatch means only that the byte-exact old data
+lineage has not been reproduced and must not be claimed as such.
+
+If byte-exact recreation is specifically required, add:
+
+```text
+--require-legacy-fingerprint-match
+```
+
+when running migration. That option fails before creating output unless the supplied legacy
+reference matches exactly.
+
+## Step 2: migration
+
+For the archived complete-month range:
+
+```bash
+pextract-migrate-paramderive \
+  --btc1-root ../past_BNN_data/data/BTCUSDT/1m \
+  --funding-root ../backtest_vCHATGPT_v5.0/market-data/funding/BTCUSDT \
+  --start 2019-12 \
+  --funding-start 2020-01 \
+  --end 2026-07 \
+  --legacy-fingerprint-reference 19e566d197f1266094faed171c6ee4936b822b3d5f061e8b405604b8aff5021c \
   --output-directory btc-run-2026/data
 ```
+
+`--funding-start` defaults to `--start`, so existing same-range uses remain compatible.
+Months before the funding boundary contribute candles only and require no funding NPZ.
 
 The destination must not already exist. The command builds a sibling temporary directory and
 only renames it into place after every source month and the generated manifest pass
@@ -73,12 +136,21 @@ btc-run-2026/data/
   candles.csv
   funding.csv
   source-provenance.json
+  legacy-preflight.json
   data-manifest.json
 ```
 
-`data-manifest.json` pins all three other files, including the provenance document. The
-standard `pextract verify-manifest`/research-bundle verifier therefore detects later edits to
-source provenance as well as edits to candles/funding.
+`data-manifest.json` pins `candles.csv`, `funding.csv` and normalized
+`source-provenance.json`. The standard `pextract verify-manifest`/research-bundle verifier
+therefore detects later edits to semantic source provenance as well as candles/funding.
+
+`legacy-preflight.json` is deliberately an operational audit sidecar rather than part of the
+new dataset fingerprint. It records the exact old raw-manifest fingerprint comparison. This
+separation is necessary because the old fingerprint includes nondeterministic acceptance
+metadata, whereas the new dataset identity intentionally does not.
+
+The migration command also prints the SHA-256 of `legacy-preflight.json`, so a run log can
+retain exact evidence of the preflight report.
 
 ### Candle conversion
 
@@ -96,8 +168,9 @@ engine because volume is not part of the strategy signal, execution, funding or 
 
 ### Funding conversion
 
-Legacy funding NPZ stores raw `timestamps_ms` and raw `rates`. The migration decodes those
-arrays without applying the old research engine's execution policy.
+Legacy funding NPZ stores raw `timestamps_ms` and raw `rates`. Only months at or after
+`--funding-start` are exported. The migration decodes those arrays without applying the old
+research engine's execution policy.
 
 In particular it does **not**:
 
@@ -115,8 +188,8 @@ Old ACCEPTED month manifests contain operational fields such as `accepted_at_utc
 `sync_status`. Recreating the same verified month on another day can legitimately change
 those fields without changing the market bytes or verification evidence.
 
-The migration excludes only these operational fields from each source-manifest semantic
-fingerprint:
+The normalized source provenance excludes only these operational fields from each
+source-manifest semantic fingerprint:
 
 ```text
 accepted_at_utc
@@ -125,8 +198,11 @@ sync_status
 
 It still pins the actual BTC1/NPZ SHA-256 values, source kind, official archive checksum
 evidence and REST-verification metadata. Therefore changing an acceptance timestamp alone
-does not create a fake new dataset fingerprint, while changing the verified market bytes or
-the substantive verification lineage does.
+does not create a fake new `parameter_extract` dataset fingerprint, while changing the
+verified market bytes or substantive verification lineage does.
+
+The exact old raw fingerprint and the normalized new dataset fingerprint are intentionally
+different concepts and are both reported.
 
 ## Wiring into a research bundle
 
