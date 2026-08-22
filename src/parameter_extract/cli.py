@@ -10,6 +10,7 @@ from .manifest import build_manifest, read_checksum_file, verify_manifest
 from .metrics import summarize
 from .models import ExecutionModel
 from .parity import check_parity_fixture
+from .promotion import freeze_discovery_result, run_validation
 from .replay import run_strategy
 from .search import run_search
 from .study import run_study
@@ -54,6 +55,23 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--search", dest="search_file", required=True)
     search.add_argument("--data-directory", required=True)
     search.add_argument("--output", required=True)
+
+    freeze = sub.add_parser(
+        "freeze-candidates",
+        help="freeze a discovery Pareto frontier into a fingerprinted candidate set",
+    )
+    freeze.add_argument("--search-result", required=True)
+    freeze.add_argument("--output", required=True)
+
+    validate = sub.add_parser(
+        "validate-candidates",
+        help="evaluate frozen candidates on validation windows without retuning",
+    )
+    validate.add_argument("--study", dest="study_file", required=True)
+    validate.add_argument("--candidates", required=True)
+    validate.add_argument("--validation", dest="validation_file", required=True)
+    validate.add_argument("--data-directory", required=True)
+    validate.add_argument("--output", required=True)
     return parser
 
 
@@ -71,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         return _study(args)
     if args.command == "search":
         return _search(args)
+    if args.command == "freeze-candidates":
+        return _freeze_candidates(args)
+    if args.command == "validate-candidates":
+        return _validate_candidates(args)
     return 2
 
 
@@ -166,6 +188,52 @@ def _search(args: argparse.Namespace) -> int:
         "pareto_candidates": payload["pareto_candidates"],
     }
     print(json.dumps(summary, indent=2))
+    return 0
+
+
+def _freeze_candidates(args: argparse.Namespace) -> int:
+    payload = freeze_discovery_result(args.search_result)
+    write_json(args.output, payload)
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "candidate_set_fingerprint_sha256": payload[
+                    "candidate_set_fingerprint_sha256"
+                ],
+                "candidate_count": payload["candidate_count"],
+                "parameters_frozen": payload["parameters_frozen"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _validate_candidates(args: argparse.Namespace) -> int:
+    payload = run_validation(
+        args.study_file,
+        args.candidates,
+        args.validation_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "validation_fingerprint_sha256": payload[
+                    "validation_fingerprint_sha256"
+                ],
+                "candidate_count": payload["candidate_count"],
+                "promoted_count": payload["promoted_count"],
+                "rejected_count": payload["rejected_count"],
+                "parameters_retuned": payload["parameters_retuned"],
+                "holdout_accessed": payload["holdout_accessed"],
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
