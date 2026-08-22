@@ -11,6 +11,7 @@ from .manifest import build_manifest, read_checksum_file, verify_manifest
 from .metrics import summarize
 from .models import ExecutionModel
 from .parity import check_parity_fixture
+from .portfolio import run_portfolio
 from .promotion import freeze_discovery_result, run_validation
 from .replay import run_strategy
 from .robustness import run_robustness
@@ -94,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     families.add_argument("--families", dest="family_file", required=True)
     families.add_argument("--data-directory", required=True)
     families.add_argument("--output", required=True)
+
+    portfolio = sub.add_parser(
+        "portfolio",
+        help="replay frozen family representatives through shared slots and explicit priority",
+    )
+    portfolio.add_argument("--study", dest="study_file", required=True)
+    portfolio.add_argument("--families-result", required=True)
+    portfolio.add_argument("--portfolio", dest="portfolio_file", required=True)
+    portfolio.add_argument("--data-directory", required=True)
+    portfolio.add_argument("--output", required=True)
     return parser
 
 
@@ -119,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         return _robustness(args)
     if args.command == "families":
         return _families(args)
+    if args.command == "portfolio":
+        return _portfolio(args)
     return 2
 
 
@@ -314,6 +327,41 @@ def _families(args: argparse.Namespace) -> int:
                     "deduplicated_center_count"
                 ],
                 "parameters_retuned": payload["parameters_retuned"],
+                "holdout_accessed": payload["holdout_accessed"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _portfolio(args: argparse.Namespace) -> int:
+    payload = run_portfolio(
+        args.study_file,
+        args.families_result,
+        args.portfolio_file,
+        data_directory=args.data_directory,
+    )
+    write_json(args.output, payload)
+    aggregate = payload["aggregate"]
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "portfolio_fingerprint_sha256": payload[
+                    "portfolio_fingerprint_sha256"
+                ],
+                "slot_count": payload["slot_count"],
+                "representative_count": payload["representative_count"],
+                "fixed_baseline_total_return_pct": aggregate[
+                    "fixed_baseline_total_return_pct"
+                ],
+                "blocked_no_slot_count": aggregate["blocked_no_slot_count"],
+                "weighted_slot_utilization_pct": aggregate[
+                    "weighted_slot_utilization_pct"
+                ],
+                "priority_optimized": payload["priority_optimized"],
+                "leverage_applied": payload["leverage_applied"],
                 "holdout_accessed": payload["holdout_accessed"],
             },
             indent=2,
